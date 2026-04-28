@@ -1,0 +1,74 @@
+# ----- Secrets & local config -----
+.env
+.env.*
+!.env.example
+.db_secret
+credentials.json
+*.pem
+*.key
+nse_index_pcr_trading_pemkey.pem
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ----- Node / Frontend -----
+node_modules/
+.next/
+out/
+.nuxt/
+.svelte-kit/
+.turbo/
+.parcel-cache/
+.pnpm-store/
+.npm/
+.yarn/
+*.tsbuildinfo
+.eslintcache
+
+# ----- Editors / OS -----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ----- Logs / runtime data -----
+logs/
+*.log
+*.log.*
+*.pid
+runtime/
+tmp/
+temp/
+
+# ----- Bot-specific local artefacts -----
+# Local broker data dumps, replay tapes, capture files
+captures/
+replays/
+*.pcap
+
+# Alembic auto-generated cache (keep migration scripts!)
+alembic/versions/__pycache__/
+
+# Playwright local browsers (we install via venv)
+.cache/ms-playwright/

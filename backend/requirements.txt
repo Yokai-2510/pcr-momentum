@@ -1,0 +1,52 @@
+# ============================================================
+# Premium-Diff Multi-Index Trading Bot — Python Dependencies
+# ============================================================
+# Python 3.12+  |  pip install -r requirements.txt
+# ============================================================
+
+# --- Broker SDK ---
+upstox-python-sdk>=2.21.0
+
+# --- Web framework ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+websockets>=14.0
+python-multipart>=0.0.18
+
+# --- Auth / Security ---
+PyJWT>=2.10.0
+bcrypt>=4.2.0
+cryptography>=44.0.0              # AES-256-GCM for credential encryption
+pyotp>=2.9.0                      # TOTP for Upstox auto-login
+
+# --- Database ---
+asyncpg>=0.30.0                   # Postgres async driver
+alembic>=1.14.0                   # Postgres migrations
+SQLAlchemy>=2.0.36                # ORM (used only for Alembic metadata)
+
+# --- Redis ---
+redis[hiredis]>=5.2.0             # async Redis client with hiredis parser
+
+# --- Data / Serialization ---
+orjson>=3.10.0                    # fast JSON on hot path
+pydantic>=2.10.0                  # schema validation
+pydantic-settings>=2.7.0         # .env / settings loader
+
+# --- Scheduling ---
+APScheduler>=3.11.0               # cron-like scheduler engine
+
+# --- HTTP client (for broker REST calls) ---
+httpx>=0.28.0                     # async HTTP client
+
+# --- Logging ---
+loguru>=0.7.3                     # structured logging
+
+# --- Browser automation (Upstox login fallback) ---
+playwright>=1.49.0                # headless Chromium for token refresh
+
+# --- Monitoring / Utils ---
+psutil>=6.1.0                     # system metrics for Health engine
+python-dotenv>=1.0.1              # .env loading
+
+# --- Dev / Test (install with: pip install -r requirements.txt -r requirements-dev.txt) ---
+# See requirements-dev.txt
