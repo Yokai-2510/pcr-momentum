@@ -73,30 +73,31 @@ foundation modules every engine will import.
     `engines/order_exec/`, `engines/background/`, `engines/scheduler/`,
     `engines/health/`, `engines/api_gateway/`
   - `brokers/upstox/`
-  - `shared/` (redis_client, postgres_client, keys, streams, schemas, lua,
-    logger, config_loader)
+  - `state/` (redis_client, postgres_client, keys, streams, schemas, lua,
+    config_loader)
+  - `log_setup.py` (top-level)
   - `tests/`
 - Shared primitives — fully implemented + unit-tested:
-  - `shared/keys.py` — typed key namespace builder (matches `Schema.md`)
-  - `shared/redis_client.py` — async Redis wrapper, Lua loader, pipelines
-  - `shared/postgres_client.py` — asyncpg pool factory, transaction helpers
-  - `shared/streams.py` — XADD/XREADGROUP wrappers, stream constants
-  - `shared/schemas/` — Pydantic models for every payload in `Schema.md` §3
-  - `shared/logger.py` — loguru config (JSON in prod, pretty in dev)
-  - `shared/config_loader.py` — `.env` + Postgres `config_*` table loader
-- Lua scripts under `shared/lua/` with a tiny test harness.
+  - `state/keys.py` — typed key namespace builder (matches `Schema.md`)
+  - `state/redis_client.py` — async + sync Redis pools, Lua loader
+  - `state/postgres_client.py` — asyncpg pool factory, transaction helpers
+  - `state/streams.py` — XADD/XREADGROUP wrappers, stream + pub/sub constants
+  - `state/schemas/` — Pydantic models for every payload in `Schema.md` §5
+  - `log_setup.py` — loguru config (JSON in prod, pretty in dev)
+  - `state/config_loader.py` — `.env` + Postgres `config_settings` loader
+- Lua scripts under `state/lua/` with a tiny test harness.
 - `pytest` + `pytest-asyncio` set up; `fakeredis` for unit tests.
 - CI: GitHub Actions workflow `ci.yml` running `ruff`, `mypy`, `pytest` on
   push.
 
 ### Deliverables
-- `feature/phase-1-skeleton` branch merged into `main`.
-- `pytest` green; `ruff` clean; `mypy --strict shared/` clean.
+- `phase-1-skeleton` branch merged into `main`.
+- `pytest` green; `ruff` clean; `mypy --strict backend/state` clean.
 - `docs/Modular_Design.md` updated to reflect any concrete signature changes.
 
 ### Exit criteria
-- A demo script can `from shared.redis_client import RedisClient` and
-  `from shared.postgres_client import PgPool`, connect, write, read.
+- A demo script can `from state.redis_client import get_redis` and
+  `from state.postgres_client import get_pool`, connect, write, read.
 - All Pydantic schemas serialize/deserialize round-trip in tests.
 
 ---

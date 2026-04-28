@@ -19,13 +19,13 @@ state/lua/*            (Lua scripts loaded by callers)
        ↑
 log_setup.py
        ↑
-engines/init_engine/*
-engines/data_pipeline_engine/*
-engines/strategy_engine/*
-engines/order_execution_engine/*
-engines/background_engine/*
-engines/scheduler_engine/*
-engines/health_engine/*
+engines/init/*
+engines/data_pipeline/*
+engines/strategy/*
+engines/order_exec/*
+engines/background/*
+engines/scheduler/*
+engines/health/*
 engines/api_gateway/*
 ```
 
@@ -155,7 +155,7 @@ Atomic multi-key Redis operations.
 
 ---
 
-## 9. `engines/init_engine/`
+## 9. `engines/init/`
 
 ### 9.1 `redis_template.py`
 
@@ -217,7 +217,7 @@ async def main() -> int
 
 ---
 
-## 10. `engines/data_pipeline_engine/`
+## 10. `engines/data_pipeline/`
 
 ### 10.1 `ws_io.py`
 ```python
@@ -255,7 +255,7 @@ async def main() -> None
 
 ---
 
-## 11. `engines/strategy_engine/`
+## 11. `engines/strategy/`
 
 ### 11.1 `premium_diff.py` (pure)
 ```python
@@ -320,7 +320,7 @@ def main() -> None
 
 ---
 
-## 12. `engines/order_execution_engine/`
+## 12. `engines/order_exec/`
 
 ### 12.1 `pre_entry_gate.py`
 ```python
@@ -379,7 +379,7 @@ def main() -> None
 
 ---
 
-## 13. `engines/background_engine/`
+## 13. `engines/background/`
 
 ### 13.1 `position_ws.py`
 ```python
@@ -424,7 +424,7 @@ def main() -> None
 
 ---
 
-## 14. `engines/scheduler_engine/`
+## 14. `engines/scheduler/`
 
 ### 14.1 `tasks.py`
 ```python
@@ -445,7 +445,7 @@ async def main() -> None
 
 ---
 
-## 15. `engines/health_engine/`
+## 15. `engines/health/`
 
 ### 15.1 `heartbeat_watcher.py`
 ```python
@@ -510,15 +510,15 @@ Owners (per HLD §7):
 3. `db/migrations/` Postgres DDL — run against local Postgres
 4. `log_setup.py`
 5. `brokers/upstox/option_contract.py`, `option_chain.py`, `instrument_search.py` (new modules)
-6. `engines/init_engine/redis_template.py` (full canonical schema)
-7. `engines/init_engine/holiday_check.py`, `auth_bootstrap.py`, `instruments_loader.py`, `strike_basket_builder.py`, `postgres_hydrator.py`
-8. `engines/init_engine/main.py`
-9. `engines/health_engine/`
-10. `engines/data_pipeline_engine/` (pure helpers first, then loops, then main)
-11. `engines/strategy_engine/` (pure functions first, then base.py, then per-index modules, then main)
-12. `engines/background_engine/` (position_ws + delta_pcr threads + pnl + utility threads)
-13. `engines/order_execution_engine/` (paper-mode lifecycle first; then live with full entry/exit/modify/cancel)
-14. `engines/scheduler_engine/`
+6. `engines/init/redis_template.py` (full canonical schema)
+7. `engines/init/holiday_check.py`, `auth_bootstrap.py`, `instruments_loader.py`, `strike_basket_builder.py`, `postgres_hydrator.py`
+8. `engines/init/main.py`
+9. `engines/health/`
+10. `engines/data_pipeline/` (pure helpers first, then loops, then main)
+11. `engines/strategy/` (pure functions first, then base.py, then per-index modules, then main)
+12. `engines/background/` (position_ws + delta_pcr threads + pnl + utility threads)
+13. `engines/order_exec/` (paper-mode lifecycle first; then live with full entry/exit/modify/cancel)
+14. `engines/scheduler/`
 15. `engines/api_gateway/` (per API.md)
 16. `deploy/systemd/` service units
 
@@ -538,16 +538,16 @@ See HLD §6 for the full table. Adding a new contract requires updating both `HL
 | `state/postgres_client.py` | integration | pool init, basic query |
 | `state/schemas/*` | unit | pydantic validation passes/fails on representative payloads |
 | `brokers/upstox/option_contract.py` | unit + integration | URL + headers correct; live `test()` returns >0 contracts for NIFTY |
-| `engines/init_engine/holiday_check.py` | unit | true/false based on Redis SET membership |
-| `engines/init_engine/auth_bootstrap.py` | integration | mock invalid token → triggers refresh path |
-| `engines/init_engine/strike_basket_builder.py` | unit (pure helpers) + integration (full build_for_index) | atm correct, expiry discovered, chain template shape correct |
-| `engines/data_pipeline_engine/tick_processor.py` | unit (pure helpers) | parse_tick correct; option_chain leaf updated correctly |
-| `engines/strategy_engine/premium_diff.py` | unit | exhaustive: zero, negative, ties |
-| `engines/strategy_engine/decision.py` | unit | every state-machine path |
-| `engines/order_execution_engine/pre_entry_gate.py` | unit | every reject reason fires correctly |
-| `engines/order_execution_engine/exit_eval.py` | unit | priority order verified |
-| `engines/background_engine/delta_pcr/compute.py` | unit | new-strike, exited-strike, normal cases |
-| `engines/background_engine/pnl_computer.py` | unit | compute_pnl for representative positions |
+| `engines/init/holiday_check.py` | unit | true/false based on Redis SET membership |
+| `engines/init/auth_bootstrap.py` | integration | mock invalid token → triggers refresh path |
+| `engines/init/strike_basket_builder.py` | unit (pure helpers) + integration (full build_for_index) | atm correct, expiry discovered, chain template shape correct |
+| `engines/data_pipeline/tick_processor.py` | unit (pure helpers) | parse_tick correct; option_chain leaf updated correctly |
+| `engines/strategy/premium_diff.py` | unit | exhaustive: zero, negative, ties |
+| `engines/strategy/decision.py` | unit | every state-machine path |
+| `engines/order_exec/pre_entry_gate.py` | unit | every reject reason fires correctly |
+| `engines/order_exec/exit_eval.py` | unit | priority order verified |
+| `engines/background/delta_pcr/compute.py` | unit | new-strike, exited-strike, normal cases |
+| `engines/background/pnl_computer.py` | unit | compute_pnl for representative positions |
 | `engines/api_gateway/*` | integration | each endpoint with auth and validation |
 
 End-to-end: full system in paper mode against recorded broker WS replay; verify expected closed_positions match.
