@@ -33,7 +33,7 @@ These apply to every phase and are non-negotiable.
 
 ## Phase 0 — Infrastructure Bootstrap
 
-**Status:** in progress (~80% done).
+**Status:** EC2-side complete; awaiting AWS-console actions.
 
 | Item | Status |
 |---|---|
@@ -48,8 +48,8 @@ These apply to every phase and are non-negotiable.
 | Smoke check script (`scripts/setup/smoke_check.py`) passes ALL_OK | done |
 | GitHub deploy key installed; `Yokai-2510/pcr-momentum` cloned to `/home/ubuntu/premium_diff_bot/repo` | done |
 | `.gitignore`, `.env.example`, README, docs pushed to `main` | done |
-| **ufw enabled with `22/80/443` allow + `deny incoming` default** | pending |
-| **fail2ban sshd jail tuned (basic ssh-iptables, maxretry=5)** | pending |
+| **ufw enabled with `22/80/443` allow + `deny incoming` default** | done |
+| **fail2ban sshd jail tuned (basic ssh-iptables, maxretry=5)** | done |
 | **AWS Security Group: open 80 & 443 (ingress), tighten 22 to operator IP** | pending — user action |
 | **Allocate Elastic IP & associate with instance** | pending — user action |
 
@@ -405,8 +405,8 @@ through here.
 ## Recommended order of operations
 
 ```
-[done]      Phase 0  — Infra
-            └── enable ufw + tighten SG (small remainder)
+[done]      Phase 0  — Infra (EC2-side)
+            └── AWS SG + Elastic IP pending (user action)
 [next]      Phase 1  — Skeleton + shared primitives
             Phase 2  — Alembic migrations
             Phase 3  — Broker SDK
