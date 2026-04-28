@@ -67,6 +67,12 @@ def integration_db_url() -> str | None:
     return os.getenv("DATABASE_URL")
 
 
+@pytest.fixture(scope="session")
+def migration_db_url() -> str | None:
+    """Return MIGRATION_TEST_DATABASE_URL when migration integration tests are enabled."""
+    return os.getenv("MIGRATION_TEST_DATABASE_URL")
+
+
 @pytest.fixture
 def env_required(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Provide the minimal env vars Settings requires for unit tests."""
