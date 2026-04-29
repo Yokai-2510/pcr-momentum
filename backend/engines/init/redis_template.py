@@ -81,8 +81,8 @@ TEMPLATE: dict[str, dict[str, Any]] = {
     K.MARKET_DATA_INSTRUMENTS_LAST_REFRESH_TS: {"type": "str", "value": ""},
     K.MARKET_DATA_SUBSCRIPTIONS_SET: {"type": "set_empty"},
     K.MARKET_DATA_SUBSCRIPTIONS_DESIRED: {"type": "set_empty"},
-    K.MARKET_DATA_WS_STATUS_MARKET: {"type": "str", "value": "disconnected"},
-    K.MARKET_DATA_WS_STATUS_PORTFOLIO: {"type": "str", "value": "disconnected"},
+    K.MARKET_DATA_WS_STATUS_MARKET: {"type": "hash_empty"},
+    K.MARKET_DATA_WS_STATUS_PORTFOLIO: {"type": "hash_empty"},
     # ── strategy: per-index runtime (configs come from hydrator) ────────
     # state, enabled, basket, pre_open, counters reset each day
     # ── orders: allocator + day-counters reset ──────────────────────────

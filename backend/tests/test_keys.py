@@ -73,9 +73,6 @@ class TestPosOrderHelpers:
     def test_signal_key(self) -> None:
         assert keys.strategy_signal("nifty50_1") == "strategy:signals:nifty50_1"
 
-    def test_bars_token(self) -> None:
-        assert keys.market_data_bars_1s("NSE_FO|49520") == "market_data:bars:1s:NSE_FO|49520"
-
 
 class TestEnumsAndIndexes:
     def test_index_tuple_complete(self) -> None:

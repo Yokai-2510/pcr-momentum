@@ -62,6 +62,17 @@ SYSTEM_FLAGS_MODE: Final[str] = "system:flags:mode"
 SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED: Final[str] = "system:flags:daily_loss_circuit_triggered"
 SYSTEM_FLAGS_INIT_FAILED: Final[str] = "system:flags:init_failed"
 
+SYSTEM_FLAGS_DATA_PIPELINE_SUBSCRIBED: Final[str] = "system:flags:data_pipeline_subscribed"
+
+
+def system_flag_engine_up(name: str) -> str:
+    return f"system:flags:engine_up:{name}"
+
+
+def system_flag_engine_exited(name: str) -> str:
+    return f"system:flags:exited:{name}"
+
+
 # Lifecycle
 SYSTEM_LIFECYCLE_START_TS: Final[str] = "system:lifecycle:start_ts"
 SYSTEM_LIFECYCLE_GIT_SHA: Final[str] = "system:lifecycle:git_sha"
@@ -140,10 +151,6 @@ def market_data_index_spot(index: str) -> str:
 def market_data_index_option_chain(index: str) -> str:
     _validate_index(index)
     return f"market_data:indexes:{index}:option_chain"
-
-
-def market_data_bars_1s(token: str) -> str:
-    return f"market_data:bars:1s:{token}"
 
 
 def market_data_stream_tick(index: str) -> str:
