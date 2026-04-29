@@ -118,9 +118,9 @@ def test_get_ltp_happy_filters_zero_prices() -> None:
             json={
                 "status": "success",
                 "data": {
-                    "NSE_INDEX|Nifty 50": {"last_price": 23010.5},
-                    "NSE_FO|49520": {"last_price": 0.0},
-                    "NSE_FO|49521": {"last_price": 142.5},
+                    "NSE_INDEX:Nifty 50": {"last_price": 23010.5, "instrument_token": "NSE_INDEX|Nifty 50"},
+                    "NSE_FO:NIFTY_CE": {"last_price": 0.0, "instrument_token": "NSE_FO|49520"},
+                    "NSE_FO:NIFTY_PE": {"last_price": 142.5, "instrument_token": "NSE_FO|49521"},
                 },
             },
         )

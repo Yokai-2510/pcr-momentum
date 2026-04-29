@@ -41,11 +41,17 @@ def get_ltp(
     except Exception as e:
         return fail(f"REQUEST_EXCEPTION: {e}")
     if code == 200 and isinstance(parsed, dict) and parsed.get("status") == "success":
+        # Upstox returns response keyed by symbol (NSE_INDEX:Nifty 50); re-key
+        # by the canonical instrument_token (NSE_INDEX|Nifty 50) so callers can
+        # look up by the same key they passed in.
         result: dict[str, float] = {}
-        for key, info in (parsed.get("data") or {}).items():
-            ltp = (info or {}).get("last_price", 0.0)
-            if ltp and ltp > 0:
-                result[key] = float(ltp)
+        for _resp_key, info in (parsed.get("data") or {}).items():
+            if not info:
+                continue
+            ltp = info.get("last_price", 0.0)
+            tok = info.get("instrument_token")
+            if ltp and ltp > 0 and tok:
+                result[tok] = float(ltp)
         return ok(result, code=code, raw=parsed)
     return fail(
         f"HTTP {code}: {parsed if parsed is not None else text}",
