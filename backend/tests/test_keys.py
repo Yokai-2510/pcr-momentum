@@ -11,9 +11,7 @@ class TestStaticConstants:
     def test_system_flag_keys_are_lowercase_colon(self) -> None:
         assert keys.SYSTEM_FLAGS_READY == "system:flags:ready"
         assert keys.SYSTEM_FLAGS_TRADING_ACTIVE == "system:flags:trading_active"
-        assert keys.SYSTEM_FLAGS_TRADING_DISABLED_REASON == (
-            "system:flags:trading_disabled_reason"
-        )
+        assert keys.SYSTEM_FLAGS_TRADING_DISABLED_REASON == ("system:flags:trading_disabled_reason")
         assert keys.SYSTEM_FLAGS_MODE == "system:flags:mode"
 
     def test_health_keys(self) -> None:

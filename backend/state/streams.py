@@ -146,9 +146,7 @@ async def xreadgroup_one(
     return (
         entry_id.decode() if isinstance(entry_id, bytes) else entry_id,
         {
-            (k.decode() if isinstance(k, bytes) else k): (
-                v.decode() if isinstance(v, bytes) else v
-            )
+            (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
             for k, v in fields.items()
         },
     )

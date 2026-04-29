@@ -132,7 +132,6 @@ def redis_key_for_config(config_key: str) -> str:
     """
     if config_key not in RUNTIME_CONFIG_REDIS_MAP:
         raise KeyError(
-            f"unknown config key {config_key!r}; "
-            f"expected one of {sorted(RUNTIME_CONFIG_REDIS_MAP)}"
+            f"unknown config key {config_key!r}; expected one of {sorted(RUNTIME_CONFIG_REDIS_MAP)}"
         )
     return RUNTIME_CONFIG_REDIS_MAP[config_key]

@@ -65,9 +65,7 @@ async def init_pool(
 
     resolved = dsn or os.getenv("DATABASE_URL")
     if not resolved:
-        raise RuntimeError(
-            "Postgres DSN not provided; set DATABASE_URL or pass dsn=..."
-        )
+        raise RuntimeError("Postgres DSN not provided; set DATABASE_URL or pass dsn=...")
     resolved = _normalize_dsn(resolved)
 
     _pool = await asyncpg.create_pool(

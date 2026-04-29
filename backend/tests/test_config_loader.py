@@ -41,9 +41,7 @@ class TestSettings:
 
 class TestRuntimeConfigMap:
     def test_redis_key_for_known_section(self) -> None:
-        assert (
-            config_loader.redis_key_for_config("execution") == "strategy:configs:execution"
-        )
+        assert config_loader.redis_key_for_config("execution") == "strategy:configs:execution"
         assert config_loader.redis_key_for_config("session") == "strategy:configs:session"
         assert config_loader.redis_key_for_config("risk") == "strategy:configs:risk"
         assert (
@@ -74,9 +72,7 @@ class TestLoadRuntimeConfigs:
         assert out == {"execution": {"buffer_inr": 2}}
 
     async def test_parses_string_json_value(self) -> None:
-        conn = _FakeConn(
-            [{"key": "session", "value": json.dumps({"market_open": "09:15"})}]
-        )
+        conn = _FakeConn([{"key": "session", "value": json.dumps({"market_open": "09:15"})}])
         out = await config_loader.load_runtime_configs(conn)  # type: ignore[arg-type]
         assert out["session"]["market_open"] == "09:15"
 

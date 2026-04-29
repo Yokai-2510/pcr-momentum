@@ -52,9 +52,7 @@ class ExitProfile(BaseModel):
     sl_pct: float = Field(..., description="Hard stop-loss as fraction of entry premium")
     target_pct: float = Field(..., description="Hard take-profit as fraction of entry premium")
     tsl_arm_pct: float = Field(..., description="Premium-rise % at which trailing SL arms")
-    tsl_trail_pct: float = Field(
-        ..., description="Trailing distance once armed (fraction of peak)"
-    )
+    tsl_trail_pct: float = Field(..., description="Trailing distance once armed (fraction of peak)")
     max_hold_sec: int = Field(..., gt=0, description="Time-exit ceiling in seconds")
 
 

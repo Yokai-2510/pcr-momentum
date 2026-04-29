@@ -35,9 +35,7 @@ class OrderEvent(BaseModel):
 
     event_type: OrderEventType
     order_id: str = Field(..., description="Broker order ID")
-    position_id: str | None = Field(
-        default=None, description="Local pos_id this order belongs to"
-    )
+    position_id: str | None = Field(default=None, description="Local pos_id this order belongs to")
     sig_id: str | None = None
     index: str | None = Field(default=None, description="nifty50 / banknifty")
     instrument_token: str | None = None
@@ -52,6 +50,4 @@ class OrderEvent(BaseModel):
     internal_latency_ms: int | None = Field(
         default=None, description="Internal processing latency (e.g. submit → ack)"
     )
-    raw: dict[str, Any] | None = Field(
-        default=None, description="Raw broker payload (audit only)"
-    )
+    raw: dict[str, Any] | None = Field(default=None, description="Raw broker payload (audit only)")

@@ -37,9 +37,7 @@ class TestConfigWriteThrough:
 # cleanup_position
 # ---------------------------------------------------------------------------
 class TestCleanupPosition:
-    def test_cleanup_drops_all_artifacts(
-        self, fake_redis_sync: object
-    ) -> None:
+    def test_cleanup_drops_all_artifacts(self, fake_redis_sync: object) -> None:
         r = fake_redis_sync
         script = r.register_script(_read("cleanup_position"))
 
@@ -107,9 +105,7 @@ class TestCapitalAllocator:
         assert int(cnt) == 1
         assert bool(r.sismember("orders:allocator:open_symbols", "nifty50")) is True
 
-    def test_second_reservation_on_same_index_rejected(
-        self, fake_redis_sync: object
-    ) -> None:
+    def test_second_reservation_on_same_index_rejected(self, fake_redis_sync: object) -> None:
         r = fake_redis_sync
         script = self._seed(r)
         keys = [
@@ -121,9 +117,7 @@ class TestCapitalAllocator:
         result = script(keys=keys, args=["nifty50", 5000, 200000, 2])
         ok, reason, _, _ = result
         assert ok == 0
-        assert (reason if isinstance(reason, str) else reason.decode()) == (
-            "ALREADY_OPEN_ON_INDEX"
-        )
+        assert (reason if isinstance(reason, str) else reason.decode()) == ("ALREADY_OPEN_ON_INDEX")
 
     def test_max_concurrent_reached(self, fake_redis_sync: object) -> None:
         r = fake_redis_sync
@@ -152,6 +146,4 @@ class TestCapitalAllocator:
         result = script(keys=keys, args=["nifty50", 250000, 200000, 2])
         ok, reason, _, _ = result
         assert ok == 0
-        assert (reason if isinstance(reason, str) else reason.decode()) == (
-            "INSUFFICIENT_CAPITAL"
-        )
+        assert (reason if isinstance(reason, str) else reason.decode()) == ("INSUFFICIENT_CAPITAL")

@@ -18,9 +18,7 @@ class TestPoolLifecycle:
         with pytest.raises(RuntimeError, match="not initialised"):
             redis_client.get_redis_sync()
 
-    def test_set_and_get_after_test_injection(
-        self, fake_redis_pair: tuple[object, object]
-    ) -> None:
+    def test_set_and_get_after_test_injection(self, fake_redis_pair: tuple[object, object]) -> None:
         async_client, sync_client = fake_redis_pair
         # The fixture installs both into the module
         assert redis_client.get_redis() is async_client
@@ -42,18 +40,14 @@ class TestSocketResolution:
 
 
 class TestLuaLoader:
-    def test_load_script_round_trip(
-        self, fake_redis_pair: tuple[object, object]
-    ) -> None:
+    def test_load_script_round_trip(self, fake_redis_pair: tuple[object, object]) -> None:
         # Use a real script from the package
         script = redis_client.load_script("config_write_through")
         assert script is not None
         # Loading again returns the cached instance (same object)
         assert redis_client.load_script("config_write_through") is script
 
-    def test_load_script_missing(
-        self, fake_redis_pair: tuple[object, object]
-    ) -> None:
+    def test_load_script_missing(self, fake_redis_pair: tuple[object, object]) -> None:
         with pytest.raises(FileNotFoundError):
             redis_client.load_script("does_not_exist")
 

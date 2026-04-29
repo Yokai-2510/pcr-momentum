@@ -115,9 +115,7 @@ class TestAlembicMigrations:
             assert admin is not None
             assert admin["role"] == "admin"
 
-            cfg_count = await conn.fetchval(
-                f"SELECT COUNT(*) FROM {target_schema}.config_settings"
-            )
+            cfg_count = await conn.fetchval(f"SELECT COUNT(*) FROM {target_schema}.config_settings")
             assert int(cfg_count) >= 5
 
             task_count = await conn.fetchval(

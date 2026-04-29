@@ -42,7 +42,8 @@ class TestHelpers:
 
 class TestEnsureConsumerGroupAndIO:
     async def test_create_group_then_read(
-        self, fake_redis_async: object  # type: ignore[type-arg]
+        self,
+        fake_redis_async: object,  # type: ignore[type-arg]
     ) -> None:
         r = fake_redis_async
         stream = "test:stream:demo"
@@ -62,9 +63,7 @@ class TestEnsureConsumerGroupAndIO:
         acked = await streams.ack(r, stream, group, entry_id)
         assert acked == 1
 
-    async def test_xreadgroup_one_returns_none_on_timeout(
-        self, fake_redis_async: object
-    ) -> None:
+    async def test_xreadgroup_one_returns_none_on_timeout(self, fake_redis_async: object) -> None:
         r = fake_redis_async
         stream = "test:stream:empty"
         group = "g1"

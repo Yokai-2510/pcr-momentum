@@ -285,9 +285,7 @@ def test_health_round_trip() -> None:
     summary = HealthSummary(
         summary="OK",
         engines={"init": EngineStatus(alive=True, last_hb_ts=now)},
-        dependencies={
-            "redis": DependencyStatus(name="redis", status="OK", last_probe_ts=now)
-        },
+        dependencies={"redis": DependencyStatus(name="redis", status="OK", last_probe_ts=now)},
         auth="valid",
         ts=now,
     )
@@ -462,9 +460,7 @@ def test_view_round_trip() -> None:
         mode="paper",
         auth_status="valid",
         health_summary="OK",
-        pnl=DayPnL(
-            realized=0, unrealized=0, trade_count=0, win_rate=0, day_pnl_pct_of_capital=0
-        ),
+        pnl=DayPnL(realized=0, unrealized=0, trade_count=0, win_rate=0, day_pnl_pct_of_capital=0),
         open_positions_count=0,
         ts=now,
     )

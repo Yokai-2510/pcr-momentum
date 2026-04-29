@@ -59,9 +59,7 @@ SYSTEM_FLAGS_READY: Final[str] = "system:flags:ready"
 SYSTEM_FLAGS_TRADING_ACTIVE: Final[str] = "system:flags:trading_active"
 SYSTEM_FLAGS_TRADING_DISABLED_REASON: Final[str] = "system:flags:trading_disabled_reason"
 SYSTEM_FLAGS_MODE: Final[str] = "system:flags:mode"
-SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED: Final[str] = (
-    "system:flags:daily_loss_circuit_triggered"
-)
+SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED: Final[str] = "system:flags:daily_loss_circuit_triggered"
 SYSTEM_FLAGS_INIT_FAILED: Final[str] = "system:flags:init_failed"
 
 # Lifecycle

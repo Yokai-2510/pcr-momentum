@@ -22,9 +22,7 @@ class EngineStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     alive: bool
-    last_hb_ts: datetime | None = Field(
-        default=None, description="Last heartbeat seen by Health"
-    )
+    last_hb_ts: datetime | None = Field(default=None, description="Last heartbeat seen by Health")
     restart_count: int = 0
     note: str | None = None
 
