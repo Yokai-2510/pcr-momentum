@@ -15,6 +15,8 @@ minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = [
+    "-m",
+    "not live",
     "-ra",
     "--strict-markers",
     "--strict-config",
@@ -22,6 +24,7 @@ addopts = [
 markers = [
     "integration: requires live Redis or Postgres",
     "slow: long-running test",
+    "live: hits real Upstox endpoints; requires UPSTOX_ACCESS_TOKEN",
 ]
 filterwarnings = [
     "error",
@@ -72,4 +75,4 @@ warn_unused_ignores = true
 no_implicit_reexport = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
-files = ["state", "log_setup.py"]
+files = ["state", "log_setup.py", "brokers"]

@@ -1,0 +1,52 @@
+name: Broker live tests (manual)
+
+# Manual-trigger only. Hits real Upstox endpoints, so it must NEVER run on
+# every push (rate limits + Upstox-page changes would flap CI). Operator
+# triggers from the Actions tab when validating Phase 3 broker work.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_streamer:
+        description: "Run market streamer test (skips if off-market)"
+        required: false
+        default: "true"
+
+concurrency:
+  group: broker-live
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  live:
+    name: Live broker SDK against Upstox
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Live tests (read-only paths)
+        env:
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$UPSTOX_ACCESS_TOKEN" ]; then
+            echo "UPSTOX_ACCESS_TOKEN secret not set; skipping."
+            exit 0
+          fi
+          pytest tests/broker/live -m live -v

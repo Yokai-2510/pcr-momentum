@@ -8,3 +8,7 @@ httpx                              # TestClient transport for FastAPI
 fakeredis[lua]>=2.26.0             # in-memory Redis for unit tests
 ruff>=0.8.0                        # linter + formatter
 mypy>=1.13.0                       # static type checking
+
+# Replay HTTP mocking for broker SDK
+respx>=0.21
+

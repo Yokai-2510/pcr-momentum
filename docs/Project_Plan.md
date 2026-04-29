@@ -130,6 +130,8 @@ foundation modules every engine will import.
 
 ## Phase 3 — Broker SDK (UpstoxAPI Facade)
 
+**Status:** Complete. Branch `phase-3-broker-sdk` merged to `main`. See `Modular_Design.md` §2.4 for shipped surface + verification.
+
 **Goal:** deliver the 21-module broker layer with the `UpstoxAPI` facade as
 the only public entry point.
 
@@ -408,10 +410,10 @@ through here.
 ```
 [done]      Phase 0  — Infra (EC2-side)
             └── AWS SG + Elastic IP pending (user action)
-[next]      Phase 1  — Skeleton + shared primitives
-            Phase 2  — Alembic migrations
-            Phase 3  — Broker SDK
-            Phase 4  — Init engine
+[done]      Phase 1  — Skeleton + shared primitives
+[done]      Phase 2  — Alembic migrations
+[done]      Phase 3  — Broker SDK
+[next]      Phase 4  — Init engine
             Phase 5  — Data pipeline
             Phase 6  — Strategy
             Phase 7  — Order execution
