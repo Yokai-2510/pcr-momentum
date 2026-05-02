@@ -1,11 +1,23 @@
 """
 engines.order_exec.pre_entry_gate — Stage A.
 
-Reads-only check before placing an entry order. All seven gates from
-Strategy.md §10.1 (the broker-circuit-limit one is checked at place-time
-inside entry.py because it depends on the just-fetched best-bid/ask).
+Two-step gate per Strategy.md §10.1:
 
-Returns (True, "ok") on pass, (False, "<reason>") on first failure.
+  1. `check(redis_sync, signal)` — read-only sanity gates (no state mutation).
+     Trading-active flag, daily-loss circuit, kill switch, engine_up,
+     leaf availability, spread, depth.
+
+  2. `check_and_reserve(redis_sync, signal)` — runs `check()` then atomically
+     reserves capital + concurrency slot via the allocator Lua. Returns the
+     reserved premium so the caller can release on abort/cleanup.
+
+`check()` remains a pure read-only function used by tests and observers;
+`check_and_reserve()` is what `worker.process_signal` calls.
+
+Returns
+-------
+check(...)                -> (ok: bool, reason: str)
+check_and_reserve(...)    -> (ok: bool, reason: str, premium_reserved: float)
 """
 
 from __future__ import annotations
@@ -15,6 +27,7 @@ from typing import Any
 import orjson
 import redis as _redis_sync
 
+from engines.order_exec import allocator
 from state import keys as K
 from state.schemas.signal import Signal
 
@@ -74,8 +87,26 @@ def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _read_risk_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
+    raw = redis_sync.get(K.STRATEGY_CONFIGS_RISK)
+    if not raw:
+        return {}
+    blob = raw if isinstance(raw, bytes) else raw.encode()
+    parsed = orjson.loads(blob)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _read_index_config(redis_sync: _redis_sync.Redis, index: str) -> dict[str, Any]:
+    raw = redis_sync.get(K.strategy_config_index(index))
+    if not raw:
+        return {}
+    blob = raw if isinstance(raw, bytes) else raw.encode()
+    parsed = orjson.loads(blob)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
-    """Run all reads-only gates for `signal`. (True, "ok") on full pass."""
+    """Read-only gates. (True, "ok") on full pass."""
     # 1. Trading active
     if _decode(redis_sync.get(K.SYSTEM_FLAGS_TRADING_ACTIVE)) != "true":
         return False, "trading_inactive"
@@ -109,10 +140,65 @@ def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
         return False, "crossed_book"
     if (ask - bid) / ltp > spread_skip_pct:
         return False, f"spread_too_wide:{(ask - bid) / ltp:.4f}"
-    # Depth gate (allow zero ask_qty as "unknown" — let broker reject if deep).
     if ask_qty > 0 and ask_qty < signal.qty_lots:
-        # qty_lots already represents lots; the strict broker-side check is
-        # at place-time. Strategy's gate already enforced lots*lot_size depth.
+        # Strict broker-side check is at place-time. Strategy already
+        # enforced lots*lot_size depth.
         pass
 
     return True, "ok"
+
+
+def _compute_premium_required(
+    leaf: dict[str, Any], qty_lots: int, lot_size: int
+) -> float:
+    """Reservation premium = qty_lots * lot_size * ask (worst-case fill)."""
+    ask = float(leaf.get("ask") or 0)
+    if ask <= 0:
+        ask = float(leaf.get("ltp") or 0)
+    return float(qty_lots) * float(lot_size) * ask
+
+
+def check_and_reserve(
+    redis_sync: _redis_sync.Redis,
+    signal: Signal,
+) -> tuple[bool, str, float]:
+    """Read-only gates + atomic allocator reservation.
+
+    Returns (ok, reason, premium_reserved). When ok is True the caller MUST
+    eventually call `allocator.release(...)` with the same index + premium
+    (cleanup on success, abort on entry failure).
+    """
+    ok, reason = check(redis_sync, signal)
+    if not ok:
+        return False, reason, 0.0
+
+    leaf = _read_leaf_for_token(redis_sync, signal.index, signal.instrument_token)
+    if leaf is None:
+        # Should be impossible (check() would have caught it); defensive.
+        return False, "leaf_missing", 0.0
+
+    idx_cfg = _read_index_config(redis_sync, signal.index)
+    lot_size = int(idx_cfg.get("lot_size") or 1)
+
+    risk_cfg = _read_risk_config(redis_sync)
+    trading_capital = float(risk_cfg.get("trading_capital_inr") or 0)
+    if trading_capital <= 0:
+        return False, "allocator_no_capital_configured", 0.0
+    max_concurrent = int(risk_cfg.get("max_concurrent_positions") or 0)
+    if max_concurrent <= 0:
+        return False, "allocator_no_concurrency_configured", 0.0
+
+    premium_required = _compute_premium_required(leaf, signal.qty_lots, lot_size)
+    if premium_required <= 0:
+        return False, "allocator_premium_zero", 0.0
+
+    ok2, alloc_reason, _dep, _cnt = allocator.check_and_reserve(
+        redis_sync,
+        index=signal.index,
+        premium_required_inr=premium_required,
+        trading_capital_inr=trading_capital,
+        max_concurrent_positions=max_concurrent,
+    )
+    if not ok2:
+        return False, f"allocator_{alloc_reason.lower()}", 0.0
+    return True, "ok", premium_required

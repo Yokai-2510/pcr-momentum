@@ -4,12 +4,24 @@ engines.order_exec.worker — per-signal lifecycle orchestrator.
 The worker thread pulls a Signal off the work queue and runs it through all
 six stages from Strategy.md §10:
 
-  A  pre_entry_gate           reads-only sanity gates
+  A  pre_entry_gate           reads-only sanity gates + atomic allocator reserve
   B  entry.submit_and_monitor place + monitor (paper or live)
   C  (folded into B)
   D  exit_eval (loop)         8-trigger cascade ticked from live chain leaf
   E  exit_submit              modify-only SELL (paper or live)
-  F  reporting + cleanup      ClosedPositionReport → Postgres → Lua cleanup
+  F  reporting + cleanup      ClosedPositionReport → buffer → Lua cleanup
+
+REVERSAL_FLIP intent (Strategy.md §8.2): when a signal arrives with
+`intent == REVERSAL_FLIP`, the worker first runs Stage E + F on the
+currently-open position for the index (closing the prior leg) before
+treating the signal as a fresh entry. This keeps the per-index
+"only one open position at a time" invariant atomic from the worker's
+point of view.
+
+Reporting (Bug-1 fix): the worker no longer calls `asyncio.run(persist_report)`
+because the worker thread doesn't own the asyncpg pool's loop. It pushes
+the report payload to `orders:reports:pending` (Redis LIST) and the
+Background engine drains the queue from its own loop.
 
 Each stage updates `orders:status:{pos_id}` HASH so observers (FastAPI,
 Health, dashboards) can follow progress.
@@ -17,7 +29,6 @@ Health, dashboards) can follow progress.
 
 from __future__ import annotations
 
-import asyncio
 import queue
 import time
 import uuid
@@ -31,6 +42,7 @@ import redis as _redis_sync
 from loguru import logger
 
 from engines.order_exec import (
+    allocator,
     cleanup,
     exit_eval,
     exit_submit,
@@ -41,13 +53,22 @@ from engines.order_exec import (
     entry as entry_mod,
 )
 from state import keys as K
-from state.schemas.position import ExitProfile, Position, PositionStage
+from state.schemas.position import ExitProfile, ExitReason, Position, PositionStage
 from state.schemas.report import MarketSnapshot
 from state.schemas.signal import Signal
 
 _IST = ZoneInfo("Asia/Kolkata")
 
 EXIT_POLL_SLEEP_SEC = 0.5  # how often to re-evaluate exit cascade
+
+# Mutated-each-tick fields written back to orders:positions:{pos_id} HASH
+# during the exit-eval loop (Bug-4 fix).
+_HASH_REFRESH_FIELDS = (
+    "peak_premium",
+    "tsl_armed",
+    "tsl_level",
+    "current_premium",
+)
 
 
 def _decode(value: Any) -> str:
@@ -120,6 +141,35 @@ def _persist_status(redis_sync: _redis_sync.Redis, pos_id: str, stage: PositionS
     )
 
 
+def _serialize_position_field(value: Any) -> str:
+    if isinstance(value, dict | list):
+        return orjson.dumps(value).decode()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _refresh_position_hash(
+    redis_sync: _redis_sync.Redis, position: Position, fields: tuple[str, ...]
+) -> None:
+    """Bug-4: keep dashboards consistent by HSETing mutated fields each tick."""
+    dump = position.model_dump(mode="json")
+    mapping: dict[str, str] = {}
+    for f in fields:
+        if f in dump:
+            mapping[f] = _serialize_position_field(dump[f])
+    if not mapping:
+        return
+    try:
+        redis_sync.hset(K.orders_position(position.pos_id), mapping=mapping)
+    except Exception as e:  # pragma: no cover — best-effort observability
+        logger.bind(pos_id=position.pos_id).warning(
+            f"_refresh_position_hash failed: {e!r}"
+        )
+
+
 def _build_market_snapshot(
     redis_sync: _redis_sync.Redis, index: str, signal: Signal
 ) -> MarketSnapshot:
@@ -152,29 +202,252 @@ def _record_rejected_signal(
     )
 
 
+def _buffer_report_for_persistence(
+    redis_sync: _redis_sync.Redis, report_payload: dict[str, Any]
+) -> None:
+    """Bug-1 fix: never call asyncio.run from worker thread.
+
+    The Background engine's report_drainer LPOPs this list and INSERTs into
+    Postgres on its own event loop. The buffer is bounded so a stuck DB
+    cannot OOM Redis: we trim from the head if it overflows.
+    """
+    try:
+        redis_sync.rpush(
+            K.ORDERS_REPORTS_PENDING,
+            orjson.dumps(report_payload).decode(),
+        )
+        redis_sync.ltrim(K.ORDERS_REPORTS_PENDING, -10_000, -1)
+    except Exception as e:  # pragma: no cover
+        logger.bind(engine="order_exec").exception(
+            f"buffer_report rpush failed: {e!r}"
+        )
+
+
+def _load_position_from_hash(
+    redis_sync: _redis_sync.Redis, pos_id: str
+) -> Position | None:
+    """Re-hydrate a Position from `orders:positions:{pos_id}` HASH.
+
+    Used by the REVERSAL_FLIP path (Bug-2 fix) to look up the prior leg's
+    state so we can run Stage E + F on it before opening the new leg.
+    """
+    raw = redis_sync.hgetall(K.orders_position(pos_id))
+    if not raw:
+        return None
+    decoded = {
+        (k.decode() if isinstance(k, bytes) else k): (
+            v.decode() if isinstance(v, bytes) else v
+        )
+        for k, v in raw.items()
+    }
+    typed: dict[str, Any] = {}
+    for field, value in decoded.items():
+        if not value:
+            continue
+        if field == "exit_profile":
+            try:
+                typed[field] = orjson.loads(value)
+            except Exception:
+                continue
+        elif field in ("entry_ts", "exit_ts"):
+            try:
+                typed[field] = datetime.fromisoformat(value)
+            except Exception:
+                continue
+        elif field == "tsl_armed":
+            typed[field] = value.lower() == "true"
+        elif field in (
+            "qty",
+            "strike",
+            "holding_seconds",
+        ):
+            try:
+                typed[field] = int(value)
+            except ValueError:
+                continue
+        elif field in (
+            "entry_price",
+            "exit_price",
+            "sl_level",
+            "target_level",
+            "tsl_level",
+            "tsl_arm_pct",
+            "tsl_trail_pct",
+            "peak_premium",
+            "current_premium",
+            "pnl",
+            "pnl_pct",
+            "sum_ce_at_entry",
+            "sum_pe_at_entry",
+            "delta_pcr_at_entry",
+        ):
+            try:
+                typed[field] = float(value)
+            except ValueError:
+                continue
+        else:
+            typed[field] = value
+    try:
+        return Position.model_validate(typed)
+    except Exception as e:
+        logger.bind(pos_id=pos_id).warning(
+            f"_load_position_from_hash: validation failed: {e!r}"
+        )
+        return None
+
+
+def _close_existing_position_for_flip(
+    redis_sync: _redis_sync.Redis,
+    index: str,
+    *,
+    mode: str,
+    access_token: str,
+    log: Any,
+) -> bool:
+    """REVERSAL_FLIP step 1 (Bug-2 fix): close the currently-open position
+    on `index` cleanly before opening the new leg.
+
+    Returns True when:
+      - there was no current position (nothing to close), OR
+      - the current position was successfully closed and cleaned up.
+    Returns False when we found a current position but couldn't load /
+    close it — the caller must abort the new entry to avoid double-open.
+    """
+    cur_pos_id = _decode(redis_sync.get(K.strategy_current_position_id(index)))
+    if not cur_pos_id:
+        return True
+
+    log.info(f"REVERSAL_FLIP: closing prior position {cur_pos_id} on {index}")
+    prior = _load_position_from_hash(redis_sync, cur_pos_id)
+    if prior is None:
+        log.warning(
+            f"REVERSAL_FLIP: cannot hydrate prior position {cur_pos_id}; "
+            f"skipping close, allocator may leak"
+        )
+        return False
+
+    _persist_status(redis_sync, cur_pos_id, PositionStage.EXIT_SUBMITTING,
+                    ExitReason.REVERSAL_FLIP.value)
+    try:
+        exit_result = exit_submit.submit_and_complete(
+            redis_sync, prior, ExitReason.REVERSAL_FLIP.value,
+            mode=mode, access_token=access_token, now_hhmm=_now_hhmm(),
+        )
+    except Exception as e:
+        log.exception(f"REVERSAL_FLIP exit_submit failed for {cur_pos_id}: {e!r}")
+        return False
+    _persist_status(redis_sync, cur_pos_id, PositionStage.EXIT_FILLED)
+
+    # Build a synthetic EntryResult for the prior leg — we don't have the
+    # original entry_result in memory; reconstruct what reporting needs from
+    # the persisted Position. Charges & latencies will be zero/best-effort;
+    # the gross PnL computation is still correct.
+    from engines.order_exec.entry import EntryResult as _EntryResult
+    entry_result = _EntryResult(
+        filled_qty=int(prior.qty),
+        avg_fill_price=float(prior.entry_price),
+        order_id=prior.entry_order_id,
+        order_events=[],
+        submit_to_ack_ms=0,
+        ack_to_fill_ms=0,
+    )
+
+    market_snapshot = MarketSnapshot(
+        ts=datetime.now(UTC),
+        spot=0.0,
+        sum_ce=float(prior.sum_ce_at_entry),
+        sum_pe=float(prior.sum_pe_at_entry),
+        delta=float(prior.sum_pe_at_entry - prior.sum_ce_at_entry),
+        delta_pcr_cumulative=prior.delta_pcr_at_entry,
+        per_strike={},
+    )
+
+    _persist_status(redis_sync, cur_pos_id, PositionStage.REPORTING)
+    report = reporting.build_report(
+        position=prior,
+        entry=entry_result,
+        exit_result=exit_result,
+        exit_reason=ExitReason.REVERSAL_FLIP,
+        market_snapshot_entry=market_snapshot,
+        market_snapshot_exit=market_snapshot,
+        pre_open_snapshot={},
+        signal_snapshot={"intent": "REVERSAL_FLIP"},
+        signal_to_submit_ms=0,
+        exit_eval_history=None,
+        trailing_history=None,
+    )
+    _buffer_report_for_persistence(redis_sync, report.model_dump(mode="json"))
+
+    _persist_status(redis_sync, cur_pos_id, PositionStage.CLEANUP)
+    try:
+        cleanup.cleanup(
+            redis_sync,
+            pos_id=cur_pos_id,
+            sig_id=prior.sig_id,
+            order_ids=[prior.entry_order_id, exit_result.order_id],
+            index=index,
+        )
+    except Exception as e:
+        log.exception(f"REVERSAL_FLIP cleanup raised (non-fatal): {e!r}")
+
+    # Release the prior leg's allocator reservation. The premium-required is
+    # the same magnitude that was reserved at entry (we use entry_price * qty
+    # as the canonical released figure since worst-case ask is no longer
+    # observable here).
+    released_premium = float(prior.entry_price) * float(prior.qty)
+    allocator.release(
+        redis_sync, index=index, premium_to_release_inr=released_premium
+    )
+
+    _persist_status(redis_sync, cur_pos_id, PositionStage.DONE)
+    log.info(f"REVERSAL_FLIP: prior position {cur_pos_id} closed")
+    return True
+
+
 def process_signal(
     redis_sync: _redis_sync.Redis,
     pool: asyncpg.Pool | None,
     signal: Signal,
 ) -> None:
-    """Run the full A→F pipeline for one signal. Best-effort: never raises."""
+    """Run the full A→F pipeline for one signal. Best-effort: never raises.
+
+    `pool` is retained for interface compatibility but is no longer used by
+    the worker thread (Bug-1 fix). DB persistence is now performed by the
+    Background engine's report_drainer.
+    """
+    del pool  # explicitly unused — see module docstring
     log = logger.bind(engine="order_exec", index=signal.index, sig_id=signal.sig_id)
 
     pos_id = f"P-{uuid.uuid4().hex[:12]}"
     signal_received_ts_ms = _now_ts_ms()
 
-    # ── STAGE A: pre-entry gate ─────────────────────────────────────────
+    mode = _read_mode(redis_sync)
+    access_token = _read_access_token(redis_sync) if mode == "live" else ""
+
+    # ── REVERSAL_FLIP pre-step ──────────────────────────────────────────
+    intent_value = (
+        signal.intent.value if hasattr(signal.intent, "value") else str(signal.intent)
+    )
+    if intent_value == "REVERSAL_FLIP":
+        ok_flip = _close_existing_position_for_flip(
+            redis_sync, signal.index,
+            mode=mode, access_token=access_token, log=log,
+        )
+        if not ok_flip:
+            _record_rejected_signal(redis_sync, signal, "reversal_close_failed")
+            return
+
+    # ── STAGE A: pre-entry gate + atomic allocator reserve ──────────────
     _persist_status(redis_sync, pos_id, PositionStage.GATE_PREENTRY)
-    ok, reason = pre_entry_gate.check(redis_sync, signal)
+    ok, reason, premium_reserved = pre_entry_gate.check_and_reserve(redis_sync, signal)
     if not ok:
         log.warning(f"pre_entry_gate rejected: {reason}")
         _persist_status(redis_sync, pos_id, PositionStage.ABORTED, reason)
         _record_rejected_signal(redis_sync, signal, reason)
         return
 
-    # Read mode + lot_size + index meta
-    mode = _read_mode(redis_sync)
-    access_token = _read_access_token(redis_sync) if mode == "live" else ""
+    # From here on, any abort path MUST release the allocator reservation.
+
     cfg_idx = _read_index_config(redis_sync, signal.index)
     lot_size = int(cfg_idx.get("lot_size") or 1)
     sl_pct = float(cfg_idx.get("sl_pct") or 0.20)
@@ -197,11 +470,14 @@ def process_signal(
         log.warning(f"entry abandoned: {entry_result.abandon_reason}")
         _persist_status(redis_sync, pos_id, PositionStage.ABORTED, entry_result.abandon_reason or "no_fill")
         _record_rejected_signal(redis_sync, signal, entry_result.abandon_reason or "no_fill")
+        # Release the reservation we held for this attempt.
+        allocator.release(
+            redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
+        )
         return
 
     _persist_status(redis_sync, pos_id, PositionStage.ENTRY_FILLED)
 
-    # Build the Position object that exit_eval / persistence consume.
     entry_price = float(entry_result.avg_fill_price)
     sl_level = round(entry_price * (1.0 - sl_pct), 4)
     target_level = round(entry_price * (1.0 + target_pct), 4)
@@ -221,7 +497,7 @@ def process_signal(
         exit_price=None,
         exit_ts=None,
         mode=mode,  # type: ignore[arg-type]
-        intent=signal.intent.value if hasattr(signal.intent, "value") else str(signal.intent),  # type: ignore[arg-type]
+        intent=intent_value,  # type: ignore[arg-type]
         sl_level=sl_level,
         target_level=target_level,
         tsl_armed=False,
@@ -246,12 +522,10 @@ def process_signal(
         strategy_version=signal.strategy_version,
     )
 
-    # Persist the Position HASH + membership sets.
     pipe = redis_sync.pipeline()
     pipe.hset(
         K.orders_position(pos_id),
-        mapping={k: orjson.dumps(v).decode() if isinstance(v, dict | list)
-                 else (v.isoformat() if isinstance(v, datetime) else str(v))
+        mapping={k: _serialize_position_field(v)
                  for k, v in position.model_dump(mode="json").items()
                  if v is not None},
     )
@@ -274,6 +548,9 @@ def process_signal(
             cur_premium = position.current_premium
 
         position = exit_eval.update_trailing_state(position, current_premium=cur_premium)
+        # Bug-4 fix: persist mutated fields back to the HASH each tick.
+        _refresh_position_hash(redis_sync, position, _HASH_REFRESH_FIELDS)
+
         if position.tsl_armed:
             trailing_history.append({
                 "ts_ms": _now_ts_ms(),
@@ -300,7 +577,6 @@ def process_signal(
             exit_reason_resolved = reason_enum
             decision_ts_ms = _now_ts_ms()
             break
-        # Manual-exit signal? (Phase 9 will plumb /commands/manual_exit.)
         time.sleep(EXIT_POLL_SLEEP_SEC)
 
     assert exit_reason_resolved is not None  # type guard
@@ -331,16 +607,7 @@ def process_signal(
         exit_eval_history=exit_eval_history,
         trailing_history=trailing_history or None,
     )
-
-    if pool is not None:
-        try:
-            asyncio.run(reporting.persist_report(pool, report))
-        except Exception as e:
-            log.exception(f"persist_report failed; buffering: {e!r}")
-            redis_sync.rpush(
-                "orders:reports:pending",
-                orjson.dumps(report.model_dump(mode="json")).decode(),
-            )
+    _buffer_report_for_persistence(redis_sync, report.model_dump(mode="json"))
 
     _persist_status(redis_sync, pos_id, PositionStage.CLEANUP)
     order_ids = [entry_result.order_id, exit_result.order_id]
@@ -354,6 +621,11 @@ def process_signal(
         )
     except Exception as e:
         log.exception(f"cleanup raised (non-fatal): {e!r}")
+
+    # Release the allocator slot now that the position is closed.
+    allocator.release(
+        redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
+    )
 
     _persist_status(redis_sync, pos_id, PositionStage.DONE)
     log.info(

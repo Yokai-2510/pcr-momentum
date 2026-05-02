@@ -344,9 +344,16 @@ def orders_pnl_per_index(index: str) -> str:
     return f"orders:pnl:per_index:{index}"
 
 
+# Buffered persistence (Background drains)
+ORDERS_REPORTS_PENDING: Final[str] = "orders:reports:pending"
+
 # Streams
 ORDERS_STREAM_ORDER_EVENTS: Final[str] = "orders:stream:order_events"
 ORDERS_STREAM_MANUAL_EXIT: Final[str] = "orders:stream:manual_exit"
+ORDERS_STREAM_INTENT: Final[str] = "orders:intent:stream"
+
+# Scheduler / lifecycle stream — Scheduler publishes; engines consume.
+SYSTEM_STREAM_SCHEDULER_EVENTS: Final[str] = "system:stream:scheduler_events"
 
 
 # ===========================================================================

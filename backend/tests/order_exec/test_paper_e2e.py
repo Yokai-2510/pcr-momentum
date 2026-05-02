@@ -2,8 +2,8 @@
 
 We don't go through the dispatcher (no real Redis stream consumer-group
 needed) — we directly invoke `worker.process_signal` after seeding the world.
-We do NOT pass a Postgres pool, so persist_report is skipped and we can
-verify the rest of the pipeline without DB.
+We do NOT pass a Postgres pool, so the worker buffers the report payload
+to `orders:reports:pending` (Bug-1 fix) instead of touching DB.
 """
 
 from __future__ import annotations
@@ -73,6 +73,15 @@ def _seed_world(redis: Any, *, premium: float, mode: str = "paper") -> None:
         "worker_pool_size": 1,
         "liquidity_exit_suppress_after": "15:00",
     }))
+    # Bug-3 fix: allocator gate now requires risk config seed.
+    redis.set(
+        K.STRATEGY_CONFIGS_RISK,
+        orjson.dumps({
+            "trading_capital_inr": 200_000.0,
+            "max_concurrent_positions": 2,
+            "daily_loss_circuit_pct": 0.08,
+        }),
+    )
     redis.set(K.strategy_config_index("nifty50"), orjson.dumps({
         "index": "nifty50",
         "strike_step": 50,
