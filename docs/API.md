@@ -623,6 +623,126 @@ Response 200: updated full status snapshot.
 
 ---
 
+## 10b. Analytics Endpoints (Phase 10b)
+
+These endpoints back the `/analytics` page (`docs/frontend/06_Charts_Analytics.md`).
+They land together with the new tables specified in `docs/Schema.md` Phase
+10b section. **They are not implemented in Phase 9** — Phase 9 ships
+without these.
+
+All three endpoints require an admin JWT.
+
+### 10b.1 `GET /analytics/option_chain/{index}`
+
+Returns time-bucketed option-chain rollups for a given index.
+
+Path:
+- `index`: `nifty50` | `banknifty`
+
+Query:
+- `from`: ISO date (required, e.g. `2026-04-28`)
+- `to`: ISO date (required)
+- `granularity`: `1m` | `5m` | `15m` | `1h` (required)
+- `metrics`: comma-separated subset of `pcr,oi_change,multi_strike_oi,max_pain,oi_total,premium_diff` (default: all)
+- `strikes`: comma-separated integers (optional, only used by
+  `multi_strike_oi`; defaults to ATM ±2)
+
+Response 200:
+```json
+{
+  "index": "nifty50",
+  "granularity": "5m",
+  "from": "2026-04-28",
+  "to": "2026-04-28",
+  "series": [
+    {
+      "ts": "2026-04-28T09:15:00+05:30",
+      "atm": 24500,
+      "call_oi": 12450000,
+      "put_oi": 14580000,
+      "pcr": 1.17,
+      "max_pain": 24500,
+      "premium_diff": { "ce_atm": 1.5, "pe_atm": -0.8 },
+      "strike_oi": { "24450": 1420000, "24500": 1750000, "24550": 1300000 }
+    }
+  ]
+}
+```
+
+Errors:
+- `404` `INDEX_NOT_FOUND` — unknown index
+- `400` `INVALID_GRANULARITY` — granularity not in allowed set
+- `400` `RANGE_TOO_LARGE` — server may cap (`from`–`to`) span depending on
+  granularity (1m: max 7 days; 5m: 30 days; 15m: 90 days; 1h: 365 days)
+
+### 10b.2 `GET /analytics/snapshots/{index}`
+
+Returns the marker snapshots captured for a given trading day.
+
+Path:
+- `index`: `nifty50` | `banknifty`
+
+Query:
+- `date`: ISO date (required, e.g. `2026-04-28`)
+- `kind`: optional filter (`pre_open` | `market_open` | `mid_session_1..4` |
+  `pre_close` | `eod`)
+
+Response 200:
+```json
+{
+  "index": "nifty50",
+  "date": "2026-04-28",
+  "items": [
+    {
+      "ts": "2026-04-28T09:14:00+05:30",
+      "kind": "pre_open",
+      "payload": { "atm": 24500, "ce_premiums": { "24450": 142.5 }, "pe_premiums": { "24450": 95.0 } }
+    },
+    {
+      "ts": "2026-04-28T15:35:00+05:30",
+      "kind": "eod",
+      "payload": { "realized_pnl": 5412.5, "trades": 7, "win_rate": 0.71 }
+    }
+  ]
+}
+```
+
+### 10b.3 `GET /analytics/strategy/{index}`
+
+Returns aggregate strategy stats for the date range plus a heatmap.
+
+Path:
+- `index`: `nifty50` | `banknifty`
+
+Query:
+- `from`: ISO date (required)
+- `to`: ISO date (required)
+
+Response 200:
+```json
+{
+  "index": "nifty50",
+  "from": "2026-04-01",
+  "to": "2026-04-30",
+  "summary": {
+    "entries": 142,
+    "win_rate": 0.62,
+    "avg_pnl": 1845.0,
+    "reversal_rate": 0.21,
+    "total_pnl": 261990.0
+  },
+  "heatmap": [
+    { "weekday": 1, "bucket_hhmm": "09:15", "count": 7,  "avg_pnl": 1450.0, "win_rate": 0.71 },
+    { "weekday": 1, "bucket_hhmm": "09:30", "count": 9,  "avg_pnl":  980.0, "win_rate": 0.55 },
+    { "weekday": 5, "bucket_hhmm": "15:15", "count": 12, "avg_pnl": -240.0, "win_rate": 0.42 }
+  ]
+}
+```
+
+`weekday` is 1 (Mon) – 5 (Fri). Bucket size is 15 min.
+
+---
+
 ## 11. WebSocket Protocol
 
 ### 11.1 Endpoint

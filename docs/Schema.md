@@ -663,8 +663,130 @@ DELETE FROM metrics_pnl_history WHERE ts < now() - interval '365 days';
 DELETE FROM metrics_delta_pcr_history WHERE ts < now() - interval '180 days';
 DELETE FROM metrics_health_history WHERE ts < now() - interval '90 days';
 DELETE FROM metrics_system_events WHERE ts < now() - interval '365 days';
+DELETE FROM metrics_option_chain_history WHERE ts < now() - interval '180 days';
+DELETE FROM metrics_market_snapshots WHERE ts < now() - interval '730 days';
 VACUUM ANALYZE;
 ```
+
+### 2.6 Analytics Tables (Phase 10b)
+
+Two new tables back the `/analytics/*` endpoints (`docs/API.md` §10b) and
+the `/analytics` page (`docs/frontend/06_Charts_Analytics.md`). They land
+in a new Alembic migration in Phase 10b — not in Phase 9.
+
+#### 2.6.1 `metrics_option_chain_history`
+
+One row per `(ts, index)` at 1-minute granularity. Coarser granularities
+(`5m`, `15m`, `1h`) are computed by the API endpoint via Postgres
+`date_trunc` aggregation; we do **not** pre-aggregate.
+
+```sql
+CREATE TABLE metrics_option_chain_history (
+    ts            TIMESTAMPTZ NOT NULL,
+    index         TEXT        NOT NULL,
+    atm           INTEGER     NOT NULL,
+    call_oi       BIGINT      NOT NULL,
+    put_oi        BIGINT      NOT NULL,
+    pcr           NUMERIC(10, 4),                -- put_oi / call_oi
+    max_pain      INTEGER,
+    premium_diff  JSONB        NOT NULL DEFAULT '{}'::jsonb,
+                                                  -- { "ce_atm": 1.5, "pe_atm": -0.8 }
+    strike_oi     JSONB        NOT NULL DEFAULT '{}'::jsonb,
+                                                  -- { "24450": 1420000, "24500": 1750000, ... }
+                                                  -- ATM ±2 strikes (5 entries)
+    PRIMARY KEY (ts, index)
+);
+
+CREATE INDEX idx_ochist_index_ts ON metrics_option_chain_history (index, ts DESC);
+```
+
+**Writer**: `engines/background/option_chain_rollup.py` reads the live
+option chain from Redis every 60 s during market hours and inserts one row
+per index. Skips outside market hours and on holidays.
+
+**Volume estimate**: 2 indices × 60 mins × 6.25 hours × ~250 trading days
+= ~187k rows/year — trivial.
+
+#### 2.6.2 `metrics_market_snapshots`
+
+Discrete event-driven captures at well-known time markers.
+
+```sql
+CREATE TABLE metrics_market_snapshots (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts            TIMESTAMPTZ  NOT NULL,
+    index         TEXT         NOT NULL,
+    kind          TEXT         NOT NULL,
+                                              -- 'pre_open' | 'market_open'
+                                              -- | 'mid_session_1' | 'mid_session_2'
+                                              -- | 'mid_session_3' | 'mid_session_4'
+                                              -- | 'pre_close' | 'eod'
+    payload       JSONB        NOT NULL,
+    UNIQUE (ts, index, kind)
+);
+
+CREATE INDEX idx_msnap_index_kind_ts ON metrics_market_snapshots (index, kind, ts DESC);
+CREATE INDEX idx_msnap_date_index ON metrics_market_snapshots ((ts::date), index);
+```
+
+**Writer**: `engines/scheduler/jobs.py` schedules eight cron-like jobs per
+trading day (timings in IST):
+
+| Job | Trigger | `kind` |
+|---|---|---|
+| Pre-open | 09:14:00 | `pre_open` |
+| Market open | 09:15:30 | `market_open` |
+| Mid-session 1 | 10:30:00 | `mid_session_1` |
+| Mid-session 2 | 12:00:00 | `mid_session_2` |
+| Mid-session 3 | 13:30:00 | `mid_session_3` |
+| Mid-session 4 | 14:30:00 | `mid_session_4` |
+| Pre-close | 15:25:00 | `pre_close` |
+| EOD | 15:35:00 | `eod` |
+
+**Payload shape examples**:
+
+```jsonc
+// pre_open / market_open
+{
+  "atm": 24500,
+  "strike_basket": [24400, 24450, 24500, 24550, 24600],
+  "ce_premiums": { "24500": 142.5, "24450": 178.0, "24400": 215.0 },
+  "pe_premiums": { "24500":  95.0, "24450":  78.0, "24400":  62.5 }
+}
+
+// mid_session_*
+{
+  "atm": 24500,
+  "call_oi": 12450000,
+  "put_oi":  14580000,
+  "pcr": 1.17,
+  "max_pain": 24500,
+  "strike_oi": { "24450": 1420000, "24500": 1750000, "24550": 1300000 },
+  "ce_premiums": { ... },
+  "pe_premiums": { ... }
+}
+
+// pre_close
+{
+  "open_position_id": "abc-...",
+  "running_pnl": 1245.5,
+  "atm": 24550,
+  "ce_premiums": { ... },
+  "pe_premiums": { ... }
+}
+
+// eod
+{
+  "realized_pnl": 5412.5,
+  "trades": 7,
+  "win_rate": 0.71,
+  "ce_close": { "24500": 18.2 },
+  "pe_close": { "24500":  9.4 }
+}
+```
+
+**Volume estimate**: 2 indices × 8 kinds × ~250 trading days = ~4k
+rows/year.
 
 ---
 

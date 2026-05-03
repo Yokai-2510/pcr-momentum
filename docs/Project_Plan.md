@@ -332,28 +332,70 @@ through here.
 
 **Goal:** the operator UI.
 
-### Scope (per `Frontend_Basics.md`)
-- App shell: Next.js 14 (app router) + TailwindCSS + shadcn/ui + Lucide.
-- WS client: connect, JWT auth, exponential backoff, full-replacement
+> **Detailed plan**: see `docs/frontend/00_Frontend_Plan.md` and siblings
+> (`01_Design_System.md`, `02_App_Shell.md`, `03_Components.md`,
+> `04_Pages.md`, `05_State_and_Data.md`, `06_Charts_Analytics.md`,
+> `07_Implementation_Order.md`).
+
+Phase 10 is split into two shippable slices.
+
+### Phase 10a — Core Operator Dashboard
+
+Uses **only existing Phase 9 backend endpoints**. Ships fully usable
+trading UI.
+
+**Scope** (per `docs/frontend/00_Frontend_Plan.md` §1):
+- App shell: Next.js 14 (App Router) + TypeScript strict + TailwindCSS +
+  shadcn/ui + Lucide. Three themes (Slate Dark, Carbon Dark, Operator
+  Light) with a single `data-theme` toggle.
+- WS client: singleton, JWT auth, exponential backoff, full-replacement
   view rendering (no merging).
+- Zustand stores: auth, views, theme, ui, command.
 - Pages:
   - `/login` — username/password.
-  - `/onboarding/credentials` — first-boot Upstox credential wizard
-    (`Frontend_Basics.md` §10).
-  - `/dashboard` — live positions, PnL, ΔPCR per index, system flags.
-  - `/configs` — strategy, risk, indices.
-  - `/positions` — closed-today + history.
+  - `/onboarding/credentials` — first-boot Upstox credential wizard.
+  - `/dashboard` — KPI strip, per-index cards, health strip, PnL sparkline.
+  - `/positions` — **unified** active + closed-today + historical with
+    filters and pagination (a single table with status tabs).
   - `/reports/[id]` — single-position report.
-  - `/operations` — manual exit, instrument refresh, token request, kill.
-- Degraded-mode banner when `trading_disabled_reason != none`.
-- Build & served by Nginx (Phase 11).
+  - `/configs` — risk / execution / session / per-index forms.
+  - `/operations` — halt/resume per index, global kill, manual exit, kill-
+    switch sheet, instrument refresh, token request.
+- Banner stack reflects every `trading_disabled_reason` value.
+- CommandMenu (⌘K) for navigation, theme switching, and operator commands.
 
-### Exit criteria
-- Lighthouse score ≥90 on dashboard.
-- Manual UAT script: log in → credential wizard → see live ticks → halt
-  index → resume → manual exit a paper trade.
-- WS reconnect resilience: kill backend, frontend shows degraded banner;
-  bring back, full state replaces within 2 s.
+**Exit criteria for 10a:**
+- Lighthouse desktop score ≥ 90 on `/dashboard`.
+- Manual UAT script: log in → credential wizard → live ticks → halt index
+  → resume → manual exit a paper trade — without reaching for the terminal.
+- WS reconnect: kill backend → banner; restart → full state replaces within
+  2 s.
+- All three themes render without layout shift / FOUC.
+- `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:e2e`,
+  `pnpm build` all green.
+
+### Phase 10b — Analytics + Snapshots
+
+Adds the analytics surface. Requires modest backend work.
+
+**Backend additions** (see `docs/Schema.md` and `docs/API.md` Phase 10b
+sections):
+- New tables: `metrics_option_chain_history`, `metrics_market_snapshots`.
+- New scheduler jobs: 1-minute option-chain rollup writer; 8 marker
+  snapshots (`pre_open`, `market_open`, four `mid_session_*`, `pre_close`,
+  `eod`).
+- New REST endpoints under `/analytics/*`.
+
+**Frontend additions** (see `docs/frontend/06_Charts_Analytics.md`):
+- `/analytics` page with chart panel (lightweight-charts), customisation
+  rail, snapshot strip, and strategy stats row.
+
+**Exit criteria for 10b:**
+- All snapshot kinds appear on a real trading day.
+- Chart panel switches between `pcr`, `oi_change`, `multi_strike_oi`,
+  `max_pain`, `delta_pcr`, `premium_diff` without flicker.
+- Filter rail updates the chart in ≤ 300 ms median.
+- Theme switch updates chart colours without remount.
 
 ---
 
@@ -421,9 +463,10 @@ through here.
 [done]      Phase 7  — Order execution
 [done]      Phase 8  — Background / Scheduler / Health
 [done]      Phase 9  — FastAPI gateway
-[next]      Phase 10 — Frontend
-            Phase 11 — Hardening / systemd / TLS
-            Phase 12 — Paper-trade → live
+[next]      Phase 10a — Frontend (core operator dashboard)
+            Phase 10b — Frontend Analytics + backend rollup endpoints
+            Phase 11  — Hardening / systemd / TLS
+            Phase 12  — Paper-trade → live
 ```
 
 ### Notes
