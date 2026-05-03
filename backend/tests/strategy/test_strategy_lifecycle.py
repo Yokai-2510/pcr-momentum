@@ -6,11 +6,18 @@ import time
 from typing import Any
 
 import orjson
+import pytest
 
 from engines.strategy.strategies.nifty50 import NIFTY50Strategy
 from state import keys as K
 from state.schemas.config import IndexConfig
 from state.schemas.signal import SignalIntent
+
+
+@pytest.fixture(autouse=True)
+def _inside_entry_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These unit tests exercise decisions, not the real wall-clock freeze."""
+    monkeypatch.setattr("engines.strategy.strategies.base._hhmm", lambda *_args: "09:30")
 
 
 def _config() -> IndexConfig:

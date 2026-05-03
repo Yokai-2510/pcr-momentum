@@ -82,4 +82,5 @@ files = [
     "engines/init",
     "engines/data_pipeline",
     "engines/strategy",
+    "engines/api_gateway",
 ]

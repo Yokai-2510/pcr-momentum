@@ -7,6 +7,7 @@ skipped automatically when `DATABASE_URL` is not set.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 
@@ -58,6 +59,7 @@ def fake_redis_pair() -> Iterator[tuple[fakeredis.aioredis.FakeRedis, fakeredis.
     try:
         yield (async_client, sync_client)
     finally:
+        asyncio.run(async_client.aclose())
         sync_client.close()
 
 

@@ -1,4 +1,6 @@
-"""API Gateway engine — FastAPI HTTP + WS surface.
+"""API Gateway engine - FastAPI HTTP + WebSocket surface.
 
-Implementation lands in Phase 9. See API.md for the full contract.
+The gateway is intentionally thin: it authenticates the operator, validates
+requests, then reads/writes Redis/Postgres or calls the broker facade. Trading
+decisions remain inside the cyclic engines.
 """

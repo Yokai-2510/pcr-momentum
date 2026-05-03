@@ -298,6 +298,8 @@ through here.
 
 ## Phase 9 — FastAPI Gateway
 
+**Status:** Complete on EC2. Full REST + WebSocket surface per API.md with 6 passing integration tests; ruff + mypy clean.
+
 **Goal:** the only thing the frontend talks to.
 
 ### Scope (per `API.md`)
@@ -316,7 +318,7 @@ through here.
   `/commands/upstox_token_request`, `/capital/funds`, `/capital/kill_switch`.
 - **Credentials:** `GET /credentials/upstox`, `POST /credentials/upstox`,
   `DELETE /credentials/upstox` (AES-256-GCM via `CREDS_ENCRYPTION_KEY`).
-- WebSocket `/ws` — push-only protocol per `Frontend_Basics.md` §3-4.
+- WebSocket `/stream` — push-only protocol per `Frontend_Basics.md` §3-4.
 - JWT middleware, CORS, rate limits per `API.md` §6.
 
 ### Exit criteria
@@ -413,13 +415,13 @@ through here.
 [done]      Phase 1  — Skeleton + shared primitives
 [done]      Phase 2  — Alembic migrations
 [done]      Phase 3  — Broker SDK
-[next]      Phase 4  — Init engine
-            Phase 5  — Data pipeline
-            Phase 6  — Strategy
-            Phase 7  — Order execution
-            Phase 8  — Background / Scheduler / Health
-            Phase 9  — FastAPI gateway
-            Phase 10 — Frontend
+[done]      Phase 4  — Init engine
+[done]      Phase 5  — Data pipeline
+[done]      Phase 6  — Strategy
+[done]      Phase 7  — Order execution
+[done]      Phase 8  — Background / Scheduler / Health
+[done]      Phase 9  — FastAPI gateway
+[next]      Phase 10 — Frontend
             Phase 11 — Hardening / systemd / TLS
             Phase 12 — Paper-trade → live
 ```
@@ -447,4 +449,3 @@ The system is **client-shipping-ready** when every box is ticked:
 - [ ] Operator runbook covers: kill switch, manual exit, credential
       rotation, instance reboot.
 - [ ] Client has admin password + URL + a 30-min walkthrough video.
-
