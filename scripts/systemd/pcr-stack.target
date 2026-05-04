@@ -1,0 +1,7 @@
+[Unit]
+Description=PCR Momentum Trading Bot – Cyclic Engine Stack
+After=pcr-init.service
+Requires=pcr-init.service
+
+[Install]
+WantedBy=multi-user.target

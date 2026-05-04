@@ -1,0 +1,10 @@
+[Unit]
+Description=PCR Momentum – Daily Start Timer (Init + Stack)
+
+[Timer]
+OnCalendar=Mon-Fri *-*-* 08:00:00 Asia/Kolkata
+Persistent=true
+Unit=pcr-init.service
+
+[Install]
+WantedBy=timers.target

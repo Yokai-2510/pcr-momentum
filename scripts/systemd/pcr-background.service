@@ -1,0 +1,22 @@
+[Unit]
+Description=PCR Momentum – Background Engine (portfolio, PnL, polls)
+After=pcr-init.service
+PartOf=pcr-stack.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/premium_diff_bot/repo/backend
+Environment=PYTHONPATH=/home/ubuntu/premium_diff_bot/repo/backend
+Environment=APP_ENV=prod
+EnvironmentFile=/home/ubuntu/premium_diff_bot/.env
+ExecStart=/home/ubuntu/premium_diff_bot/.venv/bin/python -m engines.background
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pcr-background
+
+[Install]
+WantedBy=pcr-stack.target
