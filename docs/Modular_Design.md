@@ -2,7 +2,7 @@
 
 This document is the per-module breakdown intended for implementation. For each module, it specifies its sole responsibility, public interface (function signatures), dependencies, and testing surface.
 
-A reader should be able to implement any single module by reading only its section here, the cross-referenced schema in `Schema.md`, and the relevant rules in `LLM_Guidelines.md`.
+A reader should be able to implement any single module by reading only its section here, the cross-referenced schema in `Schema.md`.
 
 ---
 

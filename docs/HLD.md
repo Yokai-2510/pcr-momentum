@@ -386,5 +386,4 @@ premium_diff_bot/
     ├── Modular_Design.md     # per-module function-signature index
     ├── API.md                # FastAPI REST + WebSocket spec
     ├── Frontend_Basics.md    # frontend contract (push-only, view keys, JWT, reconnect)
-    └── LLM_Guidelines.md     # coding standards for LLM/human contributors
 ```

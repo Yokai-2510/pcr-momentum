@@ -1,9 +1,9 @@
-# Implementation Order — Step-by-Step for an LLM
+# Implementation Order — Step-by-Step
 
 This is the build sequence. Follow it from top to bottom. Each step is
 verifiable. Do not skip ahead.
 
-> **Before you start**: read `docs/LLM_Onboarding.md`, then the rest of the
+> **Before you start**: read `docs/Frontend_Integration.md`, then the rest of the
 > `docs/frontend/` folder, in order.
 
 The frontend lives at `frontend/` inside the EC2 repo
@@ -362,7 +362,7 @@ ssh ... "cd /home/ubuntu/premium_diff_bot/repo && git checkout main && git merge
 ```
 
 Update `docs/Project_Plan.md` Phase 10a status to "Complete" using the
-patch pattern in `docs/LLM_Onboarding.md` §8.
+patch pattern in `docs/Frontend_Integration.md` §8.
 
 ---
 

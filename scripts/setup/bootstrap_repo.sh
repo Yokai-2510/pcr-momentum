@@ -167,7 +167,6 @@ All design docs live under [`docs/`](./docs):
 - `API.md` — FastAPI gateway contract
 - `Frontend_Basics.md` — push-only WS + view contract
 - `Dev_Setup.md` — operator + dev-machine setup runbook
-- `LLM_Guidelines.md` — coding standards for contributors
 - `Project_Plan.md` — phased delivery plan
 
 ## Status

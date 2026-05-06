@@ -1,6 +1,6 @@
 # Technical Design Document — Premium-Diff Multi-Index Trading Bot
 
-This document specifies the modular design and per-engine implementation contracts. An engineer (or LLM) reading this should be able to implement each engine independently with no further architectural decisions.
+This document specifies the modular design and per-engine implementation contracts. An engineer reading this should be able to implement each engine independently with no further architectural decisions.
 
 ---
 

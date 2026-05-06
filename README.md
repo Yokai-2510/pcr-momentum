@@ -1,76 +1,87 @@
 # pcr-momentum
 
-Premium-Diff Multi-Index Trading Bot — Python backend (FastAPI + asyncpg +
-Redis), Next.js frontend, Upstox broker SDK.
+Multi-index options trading bot for the Indian market (NSE F&O). Trades NIFTY 50 and BANKNIFTY using a premium-diff momentum strategy with ΔPCR overlay, daily auto-cycled engine stack, and a push-only frontend contract.
 
-> **For LLM contributors**: read [`docs/LLM_Onboarding.md`](./docs/LLM_Onboarding.md)
-> first. It covers EC2 connection, the SSOT rule, GitHub workflow, and the
-> PowerShell/SSH gotchas that catch every agent at least once.
+## At a glance
+
+- **Strategy**: per-index state machine (FLAT / IN_CE / IN_PE / COOLDOWN / HALTED) driven by SUM_CE − SUM_PE premium-difference signals, optionally vetoed by 3-minute ΔPCR readings.
+- **Topology**: 8 Python engines (init, data-pipeline, strategy, order-exec, background, scheduler, health, api-gateway) on a single EC2 host. Redis 7 for hot state, Postgres 16 for durable state.
+- **Lifecycle**: cyclic engines wake at 08:00 IST and drain at 15:45 IST weekdays via systemd timers. Postgres + Redis + Nginx + FastAPI are persistent 24×7 so the operator UI stays reachable overnight.
+- **Frontend**: Next.js on Vercel; talks to the backend over JWT-auth'd REST + a single WebSocket. No business logic in the client.
+
+## Live deployment
+
+| | |
+|---|---|
+| API | `https://3-6-128-21.sslip.io/api/` |
+| WebSocket | `wss://3-6-128-21.sslip.io/stream` |
+| Health | `https://3-6-128-21.sslip.io/api/health` |
+| OpenAPI | `https://3-6-128-21.sslip.io/api/docs` |
+
+## Repo layout
+
+```
+backend/
+  brokers/upstox/        Upstox SDK facade (auth, REST, WS streamers)
+  engines/               one process per engine
+  state/                 redis client, postgres pool, key namespace, schemas
+  alembic/               Postgres migrations
+  tests/                 unit + integration
+docs/                    design + contracts (read these first)
+scripts/
+  systemd/               pcr-*.service / pcr-*.target / pcr-*.timer
+  nginx/pcr.conf         reverse proxy vhost
+  cron/pcr-pg-backup     nightly pg_dump
+  logrotate/pcr          engine + backup log rotation
+  pcr-shutdown.sh        graceful drain script (15:45 IST)
+  setup/                 one-time EC2 bring-up scripts
+frontend/                Next.js app (Vercel-hosted; not on EC2)
+```
 
 ## Documentation
 
-All design docs live under [`docs/`](./docs):
+Start here:
 
-### Foundation
-- [`LLM_Onboarding.md`](./docs/LLM_Onboarding.md) — **read first**: EC2,
-  SSOT, GitHub, PowerShell/SSH gotchas
-- [`LLM_Guidelines.md`](./docs/LLM_Guidelines.md) — coding standards
-- [`Project_Plan.md`](./docs/Project_Plan.md) — phased delivery plan
-- [`Dev_Setup.md`](./docs/Dev_Setup.md) — operator + dev-machine runbook
+- [`docs/Project_Plan.md`](./docs/Project_Plan.md) — phased delivery + status
+- [`docs/Checkpoint.md`](./docs/Checkpoint.md) — current deployment state + cheat-sheet
+- [`docs/Dev_Setup.md`](./docs/Dev_Setup.md) — operator runbook (EC2, TLS, systemd, nginx, backups)
 
-### Architecture
-- [`HLD.md`](./docs/HLD.md) — high-level design
-- [`TDD.md`](./docs/TDD.md) — technical design / module contracts
-- [`Modular_Design.md`](./docs/Modular_Design.md) — per-module
-  responsibility & interface
-- [`Strategy.md`](./docs/Strategy.md) — premium-diff momentum strategy spec
-- [`Sequential_Flow.md`](./docs/Sequential_Flow.md) — system lifecycle &
-  failsafes
+Architecture:
 
-### Contracts
-- [`Schema.md`](./docs/Schema.md) — Redis + Postgres schema
-- [`API.md`](./docs/API.md) — FastAPI gateway contract
-- [`Frontend_Basics.md`](./docs/Frontend_Basics.md) — push-only WS + view
-  contract
+- [`docs/HLD.md`](./docs/HLD.md) — topology, engines, streams, hot-path discipline
+- [`docs/Sequential_Flow.md`](./docs/Sequential_Flow.md) — daily lifecycle, readiness gates, drain ordering, recovery
+- [`docs/Strategy.md`](./docs/Strategy.md) — premium-diff momentum spec with worked example
+- [`docs/Modular_Design.md`](./docs/Modular_Design.md) — module-level function signatures
+- [`docs/TDD.md`](./docs/TDD.md) — per-engine implementation contracts
 
-### Frontend (Phase 10)
-- [`frontend/00_Frontend_Plan.md`](./docs/frontend/00_Frontend_Plan.md) —
-  master plan, phase 10a/10b split, repo layout
-- [`frontend/01_Design_System.md`](./docs/frontend/01_Design_System.md) —
-  tokens, three themes (Slate Dark, Carbon Dark, Operator Light), Tailwind config
-- [`frontend/02_App_Shell.md`](./docs/frontend/02_App_Shell.md) — layout,
-  side nav, top bar, command palette
-- [`frontend/03_Components.md`](./docs/frontend/03_Components.md) —
-  component inventory + prop contracts
-- [`frontend/04_Pages.md`](./docs/frontend/04_Pages.md) — every page
-  detailed
-- [`frontend/05_State_and_Data.md`](./docs/frontend/05_State_and_Data.md) —
-  Zustand stores, WebSocket connection, REST client
-- [`frontend/06_Charts_Analytics.md`](./docs/frontend/06_Charts_Analytics.md)
-  — analytics page (Phase 10b) with chart spec
-- [`frontend/07_Implementation_Order.md`](./docs/frontend/07_Implementation_Order.md)
-  — step-by-step build sequence
+Contracts:
 
-## Status
+- [`docs/Schema.md`](./docs/Schema.md) — Redis + Postgres shapes
+- [`docs/API.md`](./docs/API.md) — FastAPI REST + WebSocket spec
+- [`docs/Frontend_Integration.md`](./docs/Frontend_Integration.md) — how the UI talks to the backend (auth, WS, errors, rate limits)
+- [`docs/Frontend_Basics.md`](./docs/Frontend_Basics.md) — push-only view protocol
 
-| Phase | Engine | Status |
-|---|---|---|
-| 0 | Infrastructure bootstrap (EC2, Redis, Postgres, .venv) | **Complete** |
-| 1 | Project skeleton + shared primitives (`state/`, `log_setup.py`) | **Complete** |
-| 2 | Database migrations (Alembic `0001_initial`) | **Complete** |
-| 3 | Broker SDK (UpstoxAPI facade, 21 modules + replay harness) | **Complete** |
-| 4 | Init engine (12-step bootstrapper) | **Complete** |
-| 5 | Data pipeline (WebSocket ingest, tick processor, aggregator) | **Complete** |
-| 6 | Strategy engine (premium-diff logic, 5-state machine) | **Complete** |
-| 7 | Order execution (allocator, dispatcher, entry/exit gates) | **Complete** |
-| 8 | Background, scheduler, health | **Complete** |
-| 9 | FastAPI gateway (`api_gateway/` — REST + `/stream` WebSocket, JWT, rate limit) | **Complete** |
-| 10a | Frontend — core operator dashboard | **Not started** |
-| 10b | Frontend Analytics + backend rollup endpoints | **Not started** |
-| 11 | Hardening / systemd / TLS / Nginx | **Not started** |
-| 12 | Paper-trade validation → live | **Not started** |
+Frontend (Phase 10) plans live under [`docs/frontend/`](./docs/frontend).
 
-> **Single source of truth for code is the EC2 working tree** at
-> `/home/ubuntu/premium_diff_bot/repo`. See
-> [`docs/LLM_Onboarding.md`](./docs/LLM_Onboarding.md) for the connection
-> recipe.
+## Tech stack
+
+- Python 3.12 + uvloop + asyncio
+- Redis 7 (Unix socket, no persistence, AOF off)
+- PostgreSQL 16
+- FastAPI + websockets + orjson + asyncpg
+- Upstox v2 + v3 (REST, market-data WS, portfolio WS)
+- systemd-managed processes; Nginx + Let's Encrypt for TLS
+- Next.js 14 (frontend, Vercel-hosted)
+
+## Operating it
+
+Bring-up and maintenance procedures live in [`docs/Dev_Setup.md`](./docs/Dev_Setup.md) and the `scripts/systemd/install.sh` installer:
+
+```bash
+sudo bash scripts/systemd/install.sh
+sudo certbot --nginx -d <hostname>     # one-time TLS
+systemctl status pcr-stack.target
+journalctl -u "pcr-*" -f
+```
+
+Per-day lifecycle, failure modes, and recovery are documented in [`docs/Sequential_Flow.md`](./docs/Sequential_Flow.md).
