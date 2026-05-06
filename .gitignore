@@ -72,3 +72,6 @@ alembic/versions/__pycache__/
 
 # Playwright local browsers (we install via venv)
 .cache/ms-playwright/
+
+# EC2 deploy: frontend lives only on dev box; per commit 1a508ff
+frontend/

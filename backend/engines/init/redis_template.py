@@ -65,7 +65,7 @@ TEMPLATE: dict[str, dict[str, Any]] = {
     K.SYSTEM_LIFECYCLE_GIT_SHA: {"type": "str", "value": ""},
     K.SYSTEM_LIFECYCLE_LAST_SHUTDOWN_REASON: {"type": "str", "value": ""},
     # ── system:health ────────────────────────────────────────────────
-    K.SYSTEM_HEALTH_SUMMARY: {"type": "str", "value": "OK"},
+    K.SYSTEM_HEALTH_SUMMARY: {"type": "hash_empty"},
     K.SYSTEM_HEALTH_AUTH: {"type": "str", "value": "unknown"},
     K.SYSTEM_HEALTH_ENGINES: {"type": "hash_empty"},
     K.SYSTEM_HEALTH_DEPENDENCIES: {"type": "hash_empty"},

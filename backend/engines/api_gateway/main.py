@@ -60,6 +60,7 @@ def create_app(*, init_resources: bool = True) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "https://upstoxapipcrmomentum.com"],
+        allow_origin_regex=r"https://[a-z0-9-]+\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
