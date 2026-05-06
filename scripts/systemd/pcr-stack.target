@@ -1,7 +1,9 @@
 [Unit]
 Description=PCR Momentum Trading Bot – Cyclic Engine Stack
-After=pcr-init.service
+# Engines must NOT run unless init succeeded today.
 Requires=pcr-init.service
+After=pcr-init.service
+Wants=pcr-scheduler.service pcr-data-pipeline.service pcr-background.service pcr-strategy.service pcr-order-exec.service pcr-health.service
 
 [Install]
 WantedBy=multi-user.target

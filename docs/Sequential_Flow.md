@@ -167,44 +167,74 @@ The Scheduler engine fires intraday events via `XADD system:stream:control`. It 
 
 ### 5.2 systemd unit topology
 
-```
-trading-stack.target                            (groups all cyclic engines)
-├─ trading-init.service                         (Type=oneshot, OnSuccess=trading-stack.target)
-├─ trading-health.service                       (After=trading-init)
-├─ trading-data-pipeline.service                (After=trading-health)
-├─ trading-background.service                   (After=trading-data-pipeline)
-├─ trading-strategy.service                     (After=trading-background)
-├─ trading-order-exec.service                   (After=trading-background)
-├─ trading-scheduler.service                    (After=trading-strategy,trading-order-exec)
-└─ (trading-api-gateway.service: persistent — NOT in stack target)
+Deployed unit names use the `pcr-` prefix (canonical files in `scripts/systemd/`):
 
-trading-shutdown.service                        (Type=oneshot, runs shutdown.sh)
-trading-stop.service                            (Type=oneshot: systemctl stop trading-stack.target)
-
-trading-start.timer       OnCalendar=Mon..Fri 08:00:00 Asia/Kolkata     → trading-init.service
-trading-shutdown.timer    OnCalendar=Mon..Fri 15:45:00 Asia/Kolkata     → trading-shutdown.service
-trading-stop.timer        OnCalendar=Mon..Fri 15:46:00 Asia/Kolkata     → trading-stop.service
 ```
+pcr-stack.target                                (groups all cyclic engines)
+                                                Requires=pcr-init.service
+                                                After=pcr-init.service
+                                                Wants=pcr-{scheduler,data-pipeline,background,
+                                                            strategy,order-exec,health}.service
+
+├─ pcr-init.service                             Type=oneshot, RemainAfterExit=yes
+│                                               Wants=pcr-stack.target  (pulls stack up after
+│                                                                        init goes "active")
+├─ pcr-health.service                           After=pcr-init.service, PartOf=pcr-stack.target
+├─ pcr-data-pipeline.service                    After=pcr-init.service, PartOf=pcr-stack.target
+├─ pcr-background.service                       After=pcr-init.service, PartOf=pcr-stack.target
+├─ pcr-strategy.service                         After=pcr-init.service, PartOf=pcr-stack.target
+├─ pcr-order-exec.service                       After=pcr-init.service, PartOf=pcr-stack.target
+├─ pcr-scheduler.service                        After=pcr-init.service, PartOf=pcr-stack.target
+└─ (pcr-api-gateway.service: persistent — NOT in stack.target; runs 24/7)
+
+pcr-stop.service              Type=oneshot, ExecStart=/usr/local/bin/pcr-shutdown.sh
+                              (publishes graceful_shutdown event, sleeps 60 s, then
+                              `systemctl stop pcr-stack.target` and `pcr-init.service`)
+
+pcr-start.timer    OnCalendar=Mon-Fri 08:00:00 Asia/Kolkata     → pcr-init.service
+pcr-stop.timer     OnCalendar=Mon-Fri 15:45:00 Asia/Kolkata     → pcr-stop.service
+```
+
+The dependency pattern is `Wants=` (not `OnSuccess=`) because `RemainAfterExit=yes` is required so
+that `pcr-stack.target`'s `Requires=pcr-init.service` stays satisfied for the whole trading day.
+With `OnSuccess=`, the init service would only fire its successor at the inactive transition — which
+never happens with `RemainAfterExit=yes`. The `Wants=pcr-stack.target` in the init unit queues the
+target alongside, and the target's `After=pcr-init.service` makes it wait for init success.
 
 ### 5.3 The shutdown script
 
-`shutdown.sh` is 5 lines. It does **not** import any engine code:
+`/usr/local/bin/pcr-shutdown.sh` (versioned at `scripts/pcr-shutdown.sh`) is short and does not
+import any engine code:
 
 ```bash
 #!/bin/sh
-redis-cli -s /var/run/redis/redis.sock SET system:flags:graceful_shutdown_initiated true
-redis-cli -s /var/run/redis/redis.sock XADD system:stream:control '*' event graceful_shutdown
+set -e
+SOCK=/var/run/redis/redis.sock
+redis-cli -s "$SOCK" SET system:flags:graceful_shutdown_initiated true >/dev/null
+redis-cli -s "$SOCK" XADD system:stream:control '*' event graceful_shutdown >/dev/null
+sleep 60
+systemctl stop pcr-stack.target
+systemctl stop pcr-init.service
 exit 0
 ```
 
-Engines see the event on `system:stream:control`, drain in tiers (§13), and self-exit. `trading-stop.service` at 15:46 is the safety net for any engine that fails to exit in 60s.
+Engines see the event on `system:stream:control`, drain in tiers (§13), and self-exit. The
+`systemctl stop pcr-stack.target` after 60 s catches stragglers (SIGTERM with `TimeoutStopSec`,
+then SIGKILL). Stopping `pcr-init.service` clears its `RemainAfterExit=yes` "active" status so
+tomorrow morning's timer fire actually re-runs the precheck.
 
 ### 5.4 Start trigger
 
-`trading-init.service` has `OnSuccess=trading-stack.target`. So:
-- Init exits 0 with `trading_active=true` → stack comes up; engines run normally.
-- Init exits 0 with `trading_disabled_reason ∈ {awaiting_credentials, auth_invalid}` → stack comes up **IDLE**: FastAPI + frontend serve the UI so the user can enter / fix Upstox credentials, but Strategy / Data Pipeline / Order Exec stay parked on the readiness gate. This is the credential-bootstrap path.
-- Init exits 0 with `trading_disabled_reason ∈ {holiday, manual_kill}` (skip / holiday / non-standard timings) → stack does **not** come up; cyclic engines stay off; OS idles until next 08:00. This is the cost-saving path.
+`pcr-init.service` has `Wants=pcr-stack.target` and `RemainAfterExit=yes`. So:
+- Init exits 0 with `trading_active=true` → init stays "active", stack.target activates,
+  engines run normally.
+- Init exits 0 with `trading_disabled_reason ∈ {awaiting_credentials, auth_invalid}` → stack
+  comes up **IDLE**: FastAPI + frontend serve the UI so the user can enter / fix Upstox
+  credentials, but Strategy / Data Pipeline / Order Exec stay parked on the readiness gate.
+  This is the credential-bootstrap path.
+- Init exits 0 with `trading_disabled_reason ∈ {holiday, manual_kill}` (skip / holiday /
+  non-standard timings) → stack does **not** come up; cyclic engines stay off; OS idles until
+  next 08:00. This is the cost-saving path.
 - Init exits non-zero (Redis/Postgres down, infra-level auth crash) → `OnFailure=trading-alert.service` fires (email/webhook), stack does **not** come up.
 
 The distinction matters: missing user credentials is **not** an Init failure — it is an expected first-run state and must leave the UI reachable. Only infra failures justify exit 1.

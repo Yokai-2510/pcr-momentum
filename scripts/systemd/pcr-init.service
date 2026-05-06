@@ -2,10 +2,13 @@
 Description=PCR Momentum – Init Engine (precheck & bootstrap)
 After=network.target postgresql.service redis-server.service
 Requires=postgresql.service redis-server.service
-OnSuccess=pcr-stack.target
+# Pull stack.target up alongside init; stack.target itself After=pcr-init,
+# so engines wait until init has finished and gone "active" (RemainAfterExit).
+Wants=pcr-stack.target
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/premium_diff_bot/repo/backend

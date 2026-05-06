@@ -1,0 +1,11 @@
+[Unit]
+Description=PCR Momentum – Daily Graceful Shutdown
+After=pcr-stack.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pcr-shutdown.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

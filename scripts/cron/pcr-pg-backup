@@ -1,0 +1,7 @@
+# PCR Momentum: nightly Postgres backup, 7-day retention.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 23:00 UTC = 04:30 IST  (between drain and next start)
+0 23 * * * postgres pg_dump -Fc premium_diff_bot -f /var/backups/pg/premium_diff_bot_$(date +\%F).dump 2>>/var/log/pcr-pg-backup.log
+5 23 * * * postgres find /var/backups/pg -name "premium_diff_bot_*.dump" -mtime +7 -delete 2>>/var/log/pcr-pg-backup.log

@@ -1,0 +1,20 @@
+/home/ubuntu/premium_diff_bot/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su ubuntu ubuntu
+}
+
+/var/log/pcr-pg-backup.log {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    copytruncate
+    su postgres postgres
+}

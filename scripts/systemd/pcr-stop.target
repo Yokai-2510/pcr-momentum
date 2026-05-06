@@ -1,5 +1,0 @@
-[Unit]
-Description=PCR Momentum – Daily Stop Target (graceful shutdown of cyclic engines)
-
-[Install]
-WantedBy=multi-user.target

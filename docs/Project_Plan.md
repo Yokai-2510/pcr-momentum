@@ -463,9 +463,9 @@ sections):
 [done]      Phase 7  — Order execution
 [done]      Phase 8  — Background / Scheduler / Health
 [done]      Phase 9  — FastAPI gateway
-[next]      Phase 10a — Frontend (core operator dashboard)
+[done]      Phase 11  — Hardening: systemd units + Nginx reverse proxy + Lets Encrypt TLS via 3-6-128-21.sslip.io + Postgres nightly backup + journald cap
+[next]      Phase 10a — Frontend (core operator dashboard) — UI polish on Vercel
             Phase 10b — Frontend Analytics + backend rollup endpoints
-            Phase 11  — Hardening / systemd / TLS
             Phase 12  — Paper-trade → live
 ```
 
