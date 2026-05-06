@@ -420,4 +420,4 @@ README's status table.
 - **Hydration mismatch** → some date/time used `Date.now()` outside an
   effect; replace with deterministic formatter or move into `useEffect`.
 - **PowerShell ate your heredoc** → `scp` the file instead. See
-  `LLM_Onboarding.md` §3.
+  `docs/Frontend_Integration.md`.
