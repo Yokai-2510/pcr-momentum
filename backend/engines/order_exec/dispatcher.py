@@ -45,28 +45,66 @@ async def _ensure_consumer_group(redis_async: _redis_async.Redis) -> None:
             logger.warning(f"xgroup_create raised: {e!r}")
 
 
-async def _signal_from_payload(payload: dict[str, str]) -> Signal | None:
-    """Reconstruct a Signal from stream entry fields (all string-typed in Redis)."""
+def _opt_float(payload: dict[str, str], key: str) -> float | None:
+    raw = payload.get(key)
+    if not raw or raw.lower() in {"none", "null", ""}:
+        return None
     try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _opt_int(payload: dict[str, str], key: str) -> int | None:
+    raw = payload.get(key)
+    if not raw or raw.lower() in {"none", "null", ""}:
+        return None
+    try:
+        return int(float(raw))
+    except ValueError:
+        return None
+
+
+def _opt_dict(payload: dict[str, str], key: str) -> dict:
+    raw = payload.get(key)
+    if not raw:
+        return {}
+    try:
+        import orjson
+        parsed = orjson.loads(raw if isinstance(raw, bytes) else raw.encode())
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _signal_from_payload(payload: dict[str, str]) -> Signal | None:
+    """Reconstruct a Signal from stream entry fields (all string-typed in Redis).
+
+    Signal payload v2 (Strategy.md §9.4) — strategy_id + score are first-class.
+    `instrument_id` and `index` are duplicated for backward-compat.
+    """
+    try:
+        instrument_id = payload.get("instrument_id") or payload.get("index", "nifty50")
         return Signal.model_validate({
             "sig_id": payload["sig_id"],
-            "index": payload["index"],
+            "strategy_id": payload.get("strategy_id", "bid_ask_imbalance_v1"),
+            "instrument_id": instrument_id,
+            "index": payload.get("index") or instrument_id,
             "side": payload["side"],
             "strike": int(payload["strike"]),
             "instrument_token": payload["instrument_token"],
             "intent": payload["intent"],
             "qty_lots": int(payload["qty_lots"]),
-            "diff_at_signal": float(payload.get("diff_at_signal", 0.0)),
-            "sum_ce_at_signal": float(payload.get("sum_ce_at_signal", 0.0)),
-            "sum_pe_at_signal": float(payload.get("sum_pe_at_signal", 0.0)),
-            "delta_at_signal": float(payload.get("delta_at_signal", 0.0)),
-            "delta_pcr_at_signal": (
-                float(payload["delta_pcr_at_signal"])
-                if payload.get("delta_pcr_at_signal")
-                and payload["delta_pcr_at_signal"].lower() not in {"none", "null", ""}
-                else None
-            ),
-            "strategy_version": payload.get("strategy_version", "unknown"),
+            "score": _opt_float(payload, "score"),
+            "score_breakdown": _opt_dict(payload, "score_breakdown"),
+            "net_pressure_at_signal": _opt_float(payload, "net_pressure_at_signal"),
+            "decision_ts": _opt_int(payload, "decision_ts") or int(__import__("time").time() * 1000),
+            "diff_at_signal": _opt_float(payload, "diff_at_signal") or 0.0,
+            "sum_ce_at_signal": _opt_float(payload, "sum_ce_at_signal") or 0.0,
+            "sum_pe_at_signal": _opt_float(payload, "sum_pe_at_signal") or 0.0,
+            "delta_at_signal": _opt_float(payload, "delta_at_signal") or 0.0,
+            "delta_pcr_at_signal": _opt_float(payload, "delta_pcr_at_signal"),
+            "strategy_version": payload.get("strategy_version", ""),
             "ts": payload["ts"],
         })
     except Exception as e:

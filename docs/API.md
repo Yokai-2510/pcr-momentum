@@ -1,6 +1,6 @@
 # API Specification — FastAPI Gateway
 
-This document specifies every endpoint exposed by the FastAPI Gateway: request shapes, response shapes, error codes, authentication, and the WebSocket protocol. Frontend developers should be able to build the entire client/server contract from this document alone.
+This document specifies every endpoint exposed by the FastAPI Gateway: request shapes, response shapes, error codes, authentication, and the WebSocket protocol. Frontend developers and any LLM implementing the gateway should be able to build the entire client/server contract from this document alone.
 
 ---
 

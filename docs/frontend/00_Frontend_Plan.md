@@ -3,7 +3,7 @@
 This is the index document for everything UI. Read it first, then drill into
 the numbered siblings in this folder.
 
-> **Prerequisite reading**: `docs/Frontend_Integration.md`, `docs/Frontend_Basics.md`,
+> **Prerequisite reading**: `docs/LLM_Onboarding.md`, `docs/Frontend_Basics.md`,
 > `docs/API.md`. The first defines the working environment; the second is the
 > WebSocket / view contract; the third is the REST contract.
 
@@ -267,6 +267,6 @@ All four must be green before commit.
 | `04_Pages.md` | Every page in detail with section breakdowns |
 | `05_State_and_Data.md` | Zustand stores, WS connection, REST client, JWT |
 | `06_Charts_Analytics.md` | Analytics page (Phase 10b) full spec |
-| `07_Implementation_Order.md` | Step-by-step build sequence |
+| `07_Implementation_Order.md` | Step-by-step build sequence for an LLM |
 
 Read them in order.

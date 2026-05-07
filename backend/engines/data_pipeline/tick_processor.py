@@ -62,6 +62,8 @@ async def _process_one_tick(state: DataPipelineState, tick: ParsedTick) -> None:
         # Spot persisted right away (small payload).
         await flush_spot(state.redis, index, snap)
         await _emit_tick_stream(state.redis, index, tick.token, tick.ltp, tick.ts)
+        # Notify any vessel subscribed to this spot token (used by ATM-shift logic).
+        await state.redis.publish(K.market_data_pub_tick(tick.token), b"")
         return
 
     # Option leaf: update the in-memory chain. Caller flushes the JSON periodically.
@@ -75,6 +77,11 @@ async def _process_one_tick(state: DataPipelineState, tick: ParsedTick) -> None:
         maxlen=STREAM_MAXLEN,
         approximate=True,
     )
+    # Pub/sub notification — strategy vessels SUBSCRIBE to tick.{token} for
+    # the basket tokens they care about and trigger their decision loop on
+    # receipt (Strategy.md §2.3, §9.1). Fire-and-forget; subscribers always
+    # read the latest state from Redis on wake-up so no payload is needed.
+    await state.redis.publish(K.market_data_pub_tick(tick.token), b"")
 
 
 async def _flush_chains(state: DataPipelineState, dirty_indexes: set[str]) -> None:

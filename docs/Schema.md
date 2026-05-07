@@ -12,7 +12,7 @@ All Redis keys live under one of six top-level namespaces, colon-separated:
 1. system        → flags, health, lifecycle, scheduler, market calendar, control stream
 2. user          → identity, credentials, broker auth, profile, capital
 3. market_data   → instruments, ticks, option chains, subscription state, tick streams
-4. strategy      → per-index state, configs, signals, ΔPCR, signal stream
+4. strategy      → registry, configs, per-vessel state, metrics, signal stream
 5. orders        → positions, order lifecycle, broker portfolio, PnL, allocator, exec streams
 6. ui            → view payloads, pub/sub channels, view rebuild queue, frontend streams
 ```
@@ -133,21 +133,29 @@ scheduler, health, api_gateway
       "token": "NSE_FO|49520",
       "ltp": 158.0, "bid": 157.5, "ask": 158.5,
       "bid_qty": 1500, "ask_qty": 1200,
+      "bid_prices": [157.5, 157.45, 157.4, 157.35, 157.3],
+      "ask_prices": [158.5, 158.55, 158.6, 158.65, 158.7],
+      "bid_qtys":   [1500, 800, 600, 450, 300],
+      "ask_qtys":   [1200, 700, 550, 400, 350],
+      "total_bid_qty": 3650, "total_ask_qty": 3200,
       "vol": 234500, "oi": 67800, "ts": 1714290330123
     },
-    "pe": {
-      "token": "NSE_FO|49521",
-      "ltp": 78.0, "bid": 77.5, "ask": 78.5,
-      "bid_qty": 1800, "ask_qty": 1500,
-      "vol": 198000, "oi": 89400, "ts": 1714290330123
-    }
+    "pe": { "...same shape..." }
   },
-  "24550": { "ce": {...}, "pe": {...} },
-  ...
+  "24550": { "ce": {"..."}, "pe": {"..."} }
 }
 ```
 
-Data Pipeline's tick processor parses each WS frame, identifies `(index, strike, ce|pe)` from the token via `instruments:master`, and updates the leaf fields atomically.
+Data Pipeline's tick processor parses each WS frame (Upstox `mode="full"`
+delivers 5-level depth in `marketLevel.bidAskQuote`), identifies
+`(index, strike, ce|pe)` from the token via `instruments:master`, updates
+the leaf, and `PUBLISH`es a notification on `market_data:pub:tick:{token}`
+so subscribed strategy vessels wake up (Strategy.md §2.3).
+
+#### Pub/Sub channels (Data Pipeline publishes; Strategy vessels subscribe)
+| Channel | Description |
+|---|---|
+| `market_data:pub:tick:{token}` | Empty payload; fire-and-forget per WS frame |
 
 #### Subscriptions (Data Pipeline owns)
 | Key | Type | Description |
@@ -174,46 +182,54 @@ Data Pipeline's tick processor parses each WS frame, identifies `(index, strike,
 
 ---
 
-### 1.4 `strategy:*` — Configs, Per-Index State, Signals, ΔPCR
+### 1.4 `strategy:*` — Registry, Configs, Per-Vessel State, Signals
 
-#### Configs (Init hydrates from Postgres; FastAPI writes on edit)
+The strategy namespace is fully **multi-strategy** (Strategy.md §2). Every
+vessel (`(strategy_id, instrument_id)` pair) has its own state, basket,
+metrics, and counters. Adding a new strategy is a config change; it never
+collides with existing vessels.
+
+#### Registry + Definitions
 | Key | Type | Description |
 |---|---|---|
-| `strategy:configs:execution` | JSON | `{buffer_inr, eod_buffer_inr, spread_skip_pct, drift_threshold_inr, chase_ceiling_inr, open_timeout_sec, partial_grace_sec, max_retries, worker_pool_size, liquidity_exit_suppress_after}` |
-| `strategy:configs:session` | JSON | `{market_open, pre_open_snapshot, ws_subscribe_at, delta_pcr_first_compute, delta_pcr_interval_minutes, entry_freeze, eod_squareoff, market_close, graceful_shutdown, instrument_refresh}` |
+| `strategy:registry` | SET | Active vessels — entries are `"{strategy_id}:{instrument_id}"` strings |
+| `strategy:definitions` | HASH | `{strategy_id: definition_json}` — synced from `strategy_definitions` Postgres table at init |
+
+#### Configs (Init hydrates; FastAPI writes on edit; vessels hot-reload every 60s)
+| Key | Type | Description |
+|---|---|---|
+| `strategy:configs:execution` | JSON | Order-execution layer config (worker pool, spread skip, retries) |
+| `strategy:configs:session` | JSON | Session-level (market open, EOD square-off, graceful shutdown) |
 | `strategy:configs:risk` | JSON | `{daily_loss_circuit_pct, max_concurrent_positions, trading_capital_inr}` |
-| `strategy:configs:indexes:nifty50` | JSON | Full `IndexConfig` per Strategy.md §14 |
-| `strategy:configs:indexes:banknifty` | JSON | Full `IndexConfig` per Strategy.md §14 |
+| `strategy:configs:strategies:{sid}` | JSON | Strategy-level params: thresholds, time windows, buffer size, ATM hysteresis |
+| `strategy:configs:strategies:{sid}:instruments:{idx}` | JSON | Instrument-level overrides: lot size, qty_lots, basket_size, spread thresholds, SL%, target%, cooldowns |
 
-#### Per-Index State (Strategy thread for that index writes)
+See Strategy.md §10 for the full config schema.
+
+#### Per-Vessel State (the runner for that vessel writes)
 | Key | Type | Description |
 |---|---|---|
-| `strategy:{index}:enabled` | STRING | `"true"` / `"false"` |
-| `strategy:{index}:state` | STRING | `FLAT` / `IN_CE` / `IN_PE` / `COOLDOWN` / `HALTED` (Strategy.md §3) |
-| `strategy:{index}:basket` | JSON | `{ce: [token1, token2, token3], pe: [token1, token2, token3]}` (locked at 09:15) |
-| `strategy:{index}:pre_open` | JSON | Per-strike `{token: {pre_open_premium, best_bid, best_ask, oi}}` |
-| `strategy:{index}:live:sum_ce` | STRING | Latest computed SUM_CE (rupees) |
-| `strategy:{index}:live:sum_pe` | STRING | Latest computed SUM_PE (rupees) |
-| `strategy:{index}:live:delta` | STRING | Latest `SUM_PE − SUM_CE` (signed; reversal trigger) |
-| `strategy:{index}:live:diffs` | JSON | Per-strike Diff values for dashboard |
-| `strategy:{index}:live:last_decision_ts` | STRING | Last tick processed (epoch ms) |
-| `strategy:{index}:current_position_id` | STRING | If in position, the pos_id |
-| `strategy:{index}:cooldown_until_ts` | STRING | Epoch ms; while now < this, state=COOLDOWN |
-| `strategy:{index}:cooldown_reason` | STRING | `POST_SL` / `POST_REVERSAL` (telemetry) |
-| `strategy:{index}:counters:entries_today` | STRING | All entries (initial + post-cooldown + flip-entries); cap at `max_entries_per_day` |
-| `strategy:{index}:counters:reversals_today` | STRING | Cap at `max_reversals_per_day` |
-| `strategy:{index}:counters:wins_today` | STRING | Counter |
+| `strategy:{sid}:{idx}:enabled` | STRING | `"true"` / `"false"` — operator master switch |
+| `strategy:{sid}:{idx}:state` | STRING | `FLAT` / `IN_CE` / `IN_PE` / `COOLDOWN` / `HALTED` |
+| `strategy:{sid}:{idx}:phase` | STRING | `BOOT` / `PRE_OPEN` / `SETTLE` / `LIVE` / `DRAIN` |
+| `strategy:{sid}:{idx}:phase_entered_ts` | STRING (ms) | When current phase started |
+| `strategy:{sid}:{idx}:basket` | JSON | `{atm: int, ce: [tok,...], pe: [tok,...]}` — auto-shifts as spot crosses strike steps |
+| `strategy:{sid}:{idx}:current_position_id` | STRING | Open position id, empty if FLAT |
+| `strategy:{sid}:{idx}:cooldown_until_ts` | STRING (ms) | 0 if not in cooldown |
+| `strategy:{sid}:{idx}:cooldown_reason` | STRING | `post_sl` / `post_flip` / `manual` |
+| `strategy:{sid}:{idx}:counters:entries_today` | STRING | All entries (initial + flip + post-cooldown); capped at `max_entries_per_day` |
+| `strategy:{sid}:{idx}:counters:reversals_today` | STRING | Capped at `max_reversals_per_day` |
+| `strategy:{sid}:{idx}:counters:wins_today` | STRING | Counter |
 
-#### Per-Index ΔPCR (Background ΔPCR thread for that index writes)
+#### Per-Vessel Live Metrics (Strategy.md §11.1 — written every tick)
 | Key | Type | Description |
 |---|---|---|
-| `strategy:{index}:delta_pcr:baseline` | JSON | Per-strike OI snapshot at 09:15 |
-| `strategy:{index}:delta_pcr:last_oi` | JSON | Previous-interval OI per strike (for next diff) |
-| `strategy:{index}:delta_pcr:interval` | HASH | `{interval_pcr, total_d_put, total_d_call, atm, ts}` |
-| `strategy:{index}:delta_pcr:cumulative` | HASH | `{cumulative_pcr, cumulative_d_put, cumulative_d_call, ts}` |
-| `strategy:{index}:delta_pcr:history` | LIST | List of past intervals (capped at 100) |
-| `strategy:{index}:delta_pcr:last_compute_ts` | STRING | Epoch ms of last 3-min computation |
-| `strategy:{index}:delta_pcr:mode` | STRING | `1` / `2` / `3` |
+| `strategy:{sid}:{idx}:metrics:per_strike` | JSON | `{token: {imbalance, spread, wall_state, aggressor, ltp, ...}}` |
+| `strategy:{sid}:{idx}:metrics:cum_ce_imbalance` | STRING (float) | Σ(CE bid qty) / Σ(CE ask qty) across basket |
+| `strategy:{sid}:{idx}:metrics:cum_pe_imbalance` | STRING (float) | Symmetric for PE |
+| `strategy:{sid}:{idx}:metrics:net_pressure` | STRING (float) | `cum_ce_imbalance − cum_pe_imbalance` |
+| `strategy:{sid}:{idx}:metrics:last_decision` | JSON | `{action, side, strike, score, score_breakdown, reason, ts_ms}` |
+| `strategy:{sid}:{idx}:metrics:last_decision_ts` | STRING (ms) | Used by health engine to detect silent vessels |
 
 #### Signals (Strategy emits; Order Exec consumes)
 | Key | Type | Description |

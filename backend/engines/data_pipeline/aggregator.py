@@ -37,8 +37,15 @@ def update_option_chain_leaf(
 ) -> dict[str, dict[str, dict[str, Any] | None]]:
     """Merge `tick` into chain[str(strike)][side]; preserve existing fields.
 
-    Leaf shape per Schema.md §1.3:
-        {token, ltp, bid, ask, bid_qty, ask_qty, vol, oi, ts}
+    Leaf shape per Schema.md §1.3 (extended for bid/ask imbalance strategy
+    in Strategy.md §9.1 — full 5-level depth + book aggregates):
+
+        {token, ltp,
+         bid, ask, bid_qty, ask_qty,                                # convenience top-of-book
+         bid_prices: [l1..l5], ask_prices: [l1..l5],
+         bid_qtys:   [l1..l5], ask_qtys:   [l1..l5],
+         total_bid_qty, total_ask_qty,                              # full-book aggregates
+         vol, oi, ts}
 
     Mutates `chain` in place and returns it for convenience.
     """
@@ -57,6 +64,24 @@ def update_option_chain_leaf(
         "ask": tick.ask if tick.ask is not None else existing.get("ask", 0),
         "bid_qty": tick.bid_qty if tick.bid_qty is not None else existing.get("bid_qty", 0),
         "ask_qty": tick.ask_qty if tick.ask_qty is not None else existing.get("ask_qty", 0),
+        "bid_prices": list(tick.bid_prices)
+        if any(p is not None for p in tick.bid_prices)
+        else existing.get("bid_prices", [None] * 5),
+        "ask_prices": list(tick.ask_prices)
+        if any(p is not None for p in tick.ask_prices)
+        else existing.get("ask_prices", [None] * 5),
+        "bid_qtys": list(tick.bid_qtys)
+        if any(q is not None for q in tick.bid_qtys)
+        else existing.get("bid_qtys", [None] * 5),
+        "ask_qtys": list(tick.ask_qtys)
+        if any(q is not None for q in tick.ask_qtys)
+        else existing.get("ask_qtys", [None] * 5),
+        "total_bid_qty": tick.total_bid_qty
+        if tick.total_bid_qty is not None
+        else existing.get("total_bid_qty", 0),
+        "total_ask_qty": tick.total_ask_qty
+        if tick.total_ask_qty is not None
+        else existing.get("total_ask_qty", 0),
         "vol": tick.vol if tick.vol is not None else existing.get("vol", 0),
         "oi": tick.oi if tick.oi is not None else existing.get("oi", 0),
         "ts": tick.ts,

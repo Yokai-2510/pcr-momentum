@@ -1,8 +1,13 @@
-# Modular Design — Premium-Diff Multi-Index Trading Bot
+# Modular Design — Multi-Strategy Trading Bot
 
 This document is the per-module breakdown intended for implementation. For each module, it specifies its sole responsibility, public interface (function signatures), dependencies, and testing surface.
 
 A reader should be able to implement any single module by reading only its section here, the cross-referenced schema in `Schema.md`.
+
+> **Note (2026-05-07):** the strategy-engine section here describes the
+> deprecated premium-diff design. The current strategy is the bid/ask
+> imbalance order-flow engine — see `Strategy.md` §8 for the authoritative
+> module map. This doc still applies to all non-strategy engines.
 
 ---
 
@@ -551,51 +556,3 @@ See HLD §6 for the full table. Adding a new contract requires updating both `HL
 | `engines/api_gateway/*` | integration | each endpoint with auth and validation |
 
 End-to-end: full system in paper mode against recorded broker WS replay; verify expected closed_positions match.
-
-
----
-
-## 2.4 Phase 3 implementation status
-
-**Status:** Phase 3 complete. Branch `phase-3-broker-sdk` lands the broker layer on EC2.
-
-**Shipped files** under `backend/brokers/upstox/`:
-```
-__init__.py       client.py        envelopes.py    _http.py
-auth.py           profile.py       capital.py      kill_switch.py    static_ips.py
-holidays.py       market_timings.py  market_status.py
-market_data.py    instruments.py   historical_candles.py
-option_contract.py  option_chain.py  option_greeks.py  brokerage.py
-orders.py         positions.py     rate_limiter.py
-market_streamer.py  portfolio_streamer.py
-```
-
-**Test surface** under `backend/tests/broker/`:
-- `unit/` — pure-helper + predicate + validation + rate-limiter + streamer-builder tests (no I/O).
-- `replay/` — `respx`-mocked happy + error fixtures for every UpstoxAPI REST classmethod.
-- `live/` — gated by `pytest -m live` + `UPSTOX_ACCESS_TOKEN` env var; runs against real Upstox.
-
-**Stack changes:**
-- `requests` was replaced by sync `httpx.Client` so replay tests can use `respx`.
-- One shared envelope builder (`brokers/upstox/envelopes.py`) — every REST module imports from it.
-- One shared HTTP helper (`brokers/upstox/_http.py`) — `bearer_headers` / `bearer_json` / `bearer_form` plus `request()`.
-
-**Exit criteria verification (Project_Plan.md §3):**
-
-| Criterion | Result |
-|---|---|
-| `UpstoxAPI.get_capital` returns 200 OK on EC2 | live: `success=True`, available=Rs.-354.0 |
-| `UpstoxAPI.get_option_chain` returns non-empty | live: 1902 NIFTY contracts; nearest expiry 2026-05-05 chain has 130 strikes |
-| WS streamer ≥10 ticks in 30s | live: 10 messages received in 30s on NIFTY ATM ±2 |
-| Replay tests cover every classmethod | 109 broker tests + 80 phase-1/2 = 189 green |
-| `mypy --strict backend/brokers` clean | yes (extended files= to include brokers) |
-| `ruff` clean | yes |
-
-**Workflow added:** `.github/workflows/broker-live.yml` — `workflow_dispatch` only,
-runs `tests/broker/live` against `UPSTOX_ACCESS_TOKEN` secret.
-
-**Skipped from Project_Plan.md §3 (per HLD authority):**
-- `session.py` — superseded by `auth.is_token_valid_remote`.
-- `token_refresh.py` — lives in Background Engine (Phase 8) per HLD §4.5.
-- `instrument_search.py` — Init engine (Phase 4) searches the loaded master.json directly.
-- `errors.py` — errors travel via the envelope's `error` field; no exceptions cross the API boundary.

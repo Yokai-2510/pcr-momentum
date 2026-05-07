@@ -1,140 +1,149 @@
-"""Strategy Engine entry point.
+"""
+Strategy Engine entry point.
 
-The process hosts one StrategyInstance thread per enabled index. Each thread
-owns writes under its `strategy:{index}:*` runtime namespace and emits typed
-signals to `strategy:stream:signals`.
+Single asyncio event loop hosting:
+  - tick_router_task    Redis pub/sub fan-out to vessels
+  - vessel coroutines   one per (strategy_id, instrument_id) pair
+  - heartbeat_task      writes per-vessel heartbeat every 5 s
+  - display_loop_task   formatted live-block to UI + log every 2 s
+
+The process owns ALL writes under `strategy:{sid}:{idx}:*` runtime namespace
+and emits typed signals to `strategy:stream:signals`.
+
+Run:
+    python -m engines.strategy
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import signal
 import sys
-import threading
-import time
-from contextlib import suppress
 from typing import Any
 
-import orjson
+import uvloop
 from loguru import logger
 
-from engines.strategy.strategies import (
-    BANKNIFTYStrategy,
-    NIFTY50Strategy,
-    StrategyInstance,
-)
+from engines.strategy.heartbeat import heartbeat_task
+from engines.strategy.ingestion import TickRouter
+from engines.strategy.observability.live_display import display_loop
+from engines.strategy.registry import discover_vessels
+from engines.strategy.runner import vessel_loop
 from log_setup import configure
 from state import keys as K
 from state import redis_client
-from state.schemas.config import IndexConfig
-
-_INDEX_TO_CLASS: dict[str, type[StrategyInstance]] = {
-    "nifty50": NIFTY50Strategy,
-    "banknifty": BANKNIFTYStrategy,
-}
 
 
-def _decode(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode()
-    return str(value)
-
-
-def _read_index_config(redis_sync: Any, index: str) -> IndexConfig | None:
-    """Read `strategy:configs:indexes:{index}` from Redis."""
-    raw = redis_sync.get(K.strategy_config_index(index))
-    if not raw:
-        return None
-    payload = orjson.loads(raw)
-    return IndexConfig.model_validate(payload)
-
-
-def _read_enabled_indexes(redis_sync: Any) -> list[str]:
-    out: list[str] = []
-    for idx in K.INDEXES:
-        flag = _decode(redis_sync.get(K.strategy_enabled(idx))).lower()
-        if flag == "true":
-            out.append(idx)
-    return out
-
-
-def main() -> int:
+async def _amain() -> int:
     configure(engine_name="strategy")
     log = logger.bind(engine="strategy")
+    log.info("strategy: starting")
 
+    # Wait briefly for system flag — Init may still be running on a cold boot.
     redis_client.init_pools()
     redis_sync = redis_client.get_redis_sync()
+    redis_async = redis_client.get_redis()
 
-    enabled = _read_enabled_indexes(redis_sync)
-    if not enabled:
-        log.error("strategy: no indexes enabled at boot")
-        return 1
-
-    instances: list[StrategyInstance] = []
-    threads: list[threading.Thread] = []
-
-    for idx in enabled:
-        cls = _INDEX_TO_CLASS.get(idx)
-        if cls is None:
-            log.warning(f"strategy: unknown index {idx!r}; skipping")
-            continue
-        cfg = _read_index_config(redis_sync, idx)
-        if cfg is None:
-            log.error(f"strategy: missing config for {idx!r}; skipping")
-            continue
-        instance = cls(redis_sync, cfg)
-        thread = threading.Thread(target=instance.run, daemon=True, name=f"strategy_{idx}")
-        instances.append(instance)
-        threads.append(thread)
-        thread.start()
-        log.info(f"strategy: thread started for {idx}")
-
-    if not threads:
-        log.error("strategy: no threads started")
-        return 1
-
+    # Mark engine_up flag.
     redis_sync.set(K.system_flag_engine_up("strategy"), "true")
-    redis_sync.hset(
-        K.SYSTEM_HEALTH_HEARTBEATS,
-        "strategy",
-        str(int(time.time() * 1000)),
-    )
 
-    shutting_down = threading.Event()
+    shutdown = asyncio.Event()
 
-    def _handle(_sig: int, _frame: Any) -> None:
-        log.warning("strategy: signal received; requesting shutdown")
-        shutting_down.set()
-        for instance in instances:
-            instance.request_shutdown()
+    def _on_signal(*_a: Any) -> None:
+        log.warning("strategy: signal received; shutting down")
+        shutdown.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        with suppress(Exception):
-            signal.signal(sig, _handle)
+        with contextlib.suppress(Exception):
+            signal.signal(sig, _on_signal)
 
-    while any(thread.is_alive() for thread in threads):
-        if shutting_down.is_set():
-            break
-        redis_sync.hset(
-            K.SYSTEM_HEALTH_HEARTBEATS,
-            "strategy",
-            str(int(time.time() * 1000)),
+    # Discover vessels from Redis registry.
+    specs = discover_vessels(redis_sync)
+    if not specs:
+        log.error("strategy: no vessels discovered; exiting")
+        redis_sync.set(K.system_flag_engine_up("strategy"), "false")
+        return 1
+
+    log.info(f"strategy: spawning {len(specs)} vessels")
+
+    router = TickRouter()
+    vessel_keys = [(s.strategy_id, s.instrument_id) for s in specs]
+
+    tasks: list[asyncio.Task] = []
+
+    # Tick router (subscriber).
+    tasks.append(
+        asyncio.create_task(router.run(redis_async, shutdown=shutdown), name="tick_router")
+    )
+
+    # Per-vessel runners.
+    for spec in specs:
+        tasks.append(
+            asyncio.create_task(
+                vessel_loop(
+                    spec=spec,
+                    redis_async=redis_async,
+                    redis_sync=redis_sync,
+                    router=router,
+                    shutdown=shutdown,
+                ),
+                name=f"vessel_{spec.strategy_id}_{spec.instrument_id}",
+            )
         )
-        time.sleep(1.0)
 
-    for thread in threads:
-        thread.join(timeout=10.0)
+    # Heartbeats.
+    tasks.append(
+        asyncio.create_task(
+            heartbeat_task(redis_async, vessel_keys=vessel_keys, shutdown=shutdown),
+            name="heartbeat",
+        )
+    )
 
-    redis_sync.set(K.system_flag_engine_up("strategy"), "false")
-    redis_sync.set(K.system_flag_engine_exited("strategy"), "true")
-    log.info("strategy: clean shutdown")
+    # Live display.
+    tasks.append(
+        asyncio.create_task(
+            display_loop(
+                redis_async,
+                redis_sync,
+                vessel_keys=vessel_keys,
+                shutdown=shutdown,
+            ),
+            name="display_loop",
+        )
+    )
+
+    # Wait for shutdown OR any task to exit.
+    try:
+        done, pending = await asyncio.wait(
+            tasks + [asyncio.create_task(shutdown.wait(), name="shutdown_waiter")],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in done:
+            if t.get_name() == "shutdown_waiter":
+                continue
+            if t.exception() is not None:
+                log.error(f"task {t.get_name()} crashed: {t.exception()!r}")
+        shutdown.set()
+        # Give tasks a moment to drain
+        await asyncio.wait(tasks, timeout=10.0)
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        redis_sync.set(K.system_flag_engine_up("strategy"), "false")
+        redis_sync.set(K.system_flag_engine_exited("strategy"), "true")
+        log.info("strategy: clean shutdown")
     return 0
 
 
 def _entrypoint() -> int:
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     try:
-        return main()
+        return asyncio.run(_amain())
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

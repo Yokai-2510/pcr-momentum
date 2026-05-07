@@ -115,23 +115,36 @@ WebSocket subscription is built **at 09:14:00** (pre-market) so quotes are flowi
 Heartbeat: writes ts to `system:health:heartbeats` field `data_pipeline` every 1s (TTL 5s).
 
 ### 4.3 Strategy Engine
-Two independent strategy threads, one per index, hosted in the same process.
 
-- `T_strategy_nifty50` — independent state machine for NIFTY 50
-- `T_strategy_banknifty` — independent state machine for BANKNIFTY
+Single asyncio process hosting **N vessels** — one async task per
+`(strategy_id, instrument_id)` pair (Strategy.md §2). Today: 2 vessels
+(`bid_ask_imbalance_v1` × {nifty50, banknifty}). Adding a strategy is
+config-only (`strategy:registry` SET); no engine code change.
 
-Each thread:
-1. At 09:14:50 — capture pre-open snapshot for its 6-strike basket; write to `strategy:{index}:pre_open`. Fail-closed if any basket strike has zero ts (per-index opt-out for the day).
-2. 09:15:00 → 09:15:09 — settle window: read ticks but emit no signals (filters auction-crossover noise).
-3. From 09:15:10 — continuous decision loop on each tick. State machine: `FLAT` / `IN_CE` / `IN_PE` / `COOLDOWN` / `HALTED` (Strategy.md §3).
-4. Compute `SUM_CE`, `SUM_PE`, `delta = SUM_PE − SUM_CE` per tick; write to `strategy:{index}:live:*`.
-5. Emit entry signals when `FLAT`, reversal flip signals when `IN_*`, no signals when `COOLDOWN` or `HALTED`.
-6. Honor daily caps (`max_entries_per_day` / `max_reversals_per_day`) and the entry-freeze window (15:10 → 15:15).
-7. Read ΔPCR from `strategy:{index}:delta_pcr:cumulative` for veto modes 2/3 if enabled (default: mode 1 — informational only).
+Internal layout:
+- `tick_router` — single Redis pub/sub subscriber; fans wake-up events to
+  per-vessel `asyncio.Event` flags
+- `vessel` coroutines — one per registry entry; event-driven loop
+- `heartbeat_task` — writes per-vessel + engine heartbeats every 5 s
+- `display_loop` — formatted live block to logs + UI every 2 s
 
-Signals emitted to `strategy:stream:signals` with `index` tag, idempotent on `sig_id = sha256(index | tick_seq | side | strike | intent)`.
+Per-vessel loop (event-driven, no artificial floor):
+1. `prepare()` → `on_pre_open()` (no-op for bid/ask imbalance) → enter LIVE phase
+2. Build initial basket = ATM ± N strikes, push tokens to `market_data:subscriptions:desired`
+3. Subscribe to `market_data:pub:tick:{token}` for every basket token
+4. On any wake-up: read option_chain + spot, build typed `Snapshot`, call
+   `strategy.on_tick(ctx, snapshot, memory)` → `Action`
+5. Persist last-decision telemetry every tick (kills silent-loop bugs);
+   apply state transitions; emit Signal to `strategy:stream:signals` if actionable
+6. Re-check basket every 1 s — auto-shifts when spot crosses a strike step
+7. At 15:30 IST: enter DRAIN phase, stop emitting new entries
 
-Heartbeat: per-index field in `system:health:heartbeats` — `strategy:nifty50`, `strategy:banknifty`.
+State machine (per vessel): `FLAT / IN_CE / IN_PE / COOLDOWN / HALTED` (Strategy.md §5.5).
+
+Signals emitted to `strategy:stream:signals` with `strategy_id` + `instrument_id`
+tags. Idempotent on `sig_id = sha256(strategy_id | instrument_id | kind | side | strike | ts_ms)`.
+
+Heartbeats: dynamic — `strategy:{sid}:{idx}` per vessel + `strategy` for the engine itself.
 
 ### 4.4 Order Execution Engine
 Single shared process serving both indexes via a pre-warmed thread pool.
@@ -154,8 +167,6 @@ Heartbeat: `system:health:heartbeats` field `order_exec`.
 Threads:
 - `T_position_ws` — broker portfolio WebSocket; writes `orders:broker:pos:{order_id}` HASH on every fill/order event + `XADD orders:stream:order_events`
 - `T_pnl` — every 1s, reads open positions + ticks → updates `orders:pnl:realized`, `orders:pnl:unrealized`, `orders:pnl:per_index:{index}`, `orders:pnl:day`
-- `T_delta_pcr_nifty50` — every 3 min from 09:18, computes ΔPCR for NIFTY 50, writes `strategy:nifty50:delta_pcr:*`
-- `T_delta_pcr_banknifty` — same for BANKNIFTY
 - `T_token_refresh` — checks `auth.is_token_valid_remote()` every 5 min
 - `T_capital_poll` — `capital.get_capital()` every 30s → `user:capital:funds`
 - `T_kill_switch_poll` — `kill_switch.get_kill_switch_status()` every 30s → `user:capital:kill_switch`
@@ -192,19 +203,20 @@ No business logic. Pure pipe. Full spec in `API.md`.
 
 | Engine | Per-Index Pattern |
 |---|---|
-| Data Pipeline | Single thread; both indexes' ticks flow through the same WS connection |
-| Strategy Engine | **2 threads** — one per index, completely independent state machines |
-| Order Execution | Shared thread pool; signals tagged with `index` are routed to any free worker |
-| Background Engine | **2 ΔPCR threads** + 1 position WS thread + 1 PnL thread + util threads |
+| Data Pipeline | Single thread; all instruments' ticks flow through one WS connection |
+| Strategy Engine | **N async vessels** — one per `(strategy_id, instrument_id)` pair, fully independent. All vessels share one event loop; basket subscription is deduped at the data-pipeline layer |
+| Order Execution | Shared thread pool (default 8); signals carry `strategy_id` + `instrument_id` for routing + attribution |
+| Background Engine | 1 position WS thread + 1 PnL thread + util threads |
 | Scheduler | Single thread; events fired with `index` payload when relevant |
-| Health | Single thread; tracks both indexes' strategy heartbeats separately |
+| Health | Single thread; tracks per-vessel + per-engine heartbeats |
 
 ## 6. Streams & Pub/Sub Channels
 
 ```
 system:stream:control               Scheduler   →  all engines
-market_data:stream:tick:nifty50     DataPipe    →  Strategy.NIFTY, Order Exec
-market_data:stream:tick:banknifty   DataPipe    →  Strategy.BANKNIFTY, Order Exec
+market_data:stream:tick:nifty50     DataPipe    →  Order Exec
+market_data:stream:tick:banknifty   DataPipe    →  Order Exec
+market_data:pub:tick:{token}        DataPipe    →  Strategy vessels (pub/sub)
 strategy:stream:signals             Strategy    →  Order Exec (consumer group "exec")
 strategy:stream:rejected_signals    Strategy    →  audit only
 orders:stream:order_events          Background  →  Order Exec, FastAPI
@@ -386,4 +398,5 @@ premium_diff_bot/
     ├── Modular_Design.md     # per-module function-signature index
     ├── API.md                # FastAPI REST + WebSocket spec
     ├── Frontend_Basics.md    # frontend contract (push-only, view keys, JWT, reconnect)
+    └── LLM_Guidelines.md     # coding standards for LLM/human contributors
 ```

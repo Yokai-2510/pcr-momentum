@@ -1,69 +1,393 @@
-# Strategy & Execution — Premium-Diff Multi-Index Trading Bot
+# Strategy Engine — Bid/Ask Imbalance Order-Flow
 
-This document defines:
+This document is the **complete and only** specification for the strategy engine going forward.
 
-1. The trading thesis (the edge claim).
-2. The per-index state machine and the continuous decision loop.
-3. Strike-basket construction and the pre-open snapshot protocol.
-4. Entry / exit / reversal-flip decision flowcharts.
-5. Cooldowns, daily caps, and the full risk-control cascade.
-6. The full order-execution flow from signal to cleanup, with broker-WS-driven monitoring.
-7. The ΔPCR overlay (informational only; never on the hot path by default).
-8. The complete configuration surface and tunable parameters.
+It replaces the previous "Premium-Diff Momentum" strategy entirely. The premium-diff code path, schema keys, configs, and database columns specific to it are deprecated and will be removed during this implementation. No backwards compatibility shims are kept — the bot is pre-revenue, paper-only, and the cleanest possible cut is the right one.
 
-This is the only authoritative source for strategy + execution. The lifecycle / boot / shutdown is covered in `Sequential_Flow.md`. The schema is covered in `Schema.md`. The broker SDK is covered in `backend/brokers/upstox/__init__.py`.
+This doc covers:
+
+1. The trading thesis (the edge claim)
+2. Engine architecture — one process, N strategy vessels, async event-driven
+3. Strike basket construction + dynamic ATM management
+4. The eight atomic metrics that drive every decision
+5. The decision logic — entry gates, continuation, reversal warning
+6. Time-of-day windowing
+7. Module-by-module code layout (every section maps 1:1 to a file)
+8. Data flow + lifecycle
+9. Schema (Redis + Postgres)
+10. Configuration surface
+11. Logging, observability, live display
+12. Migration plan from premium-diff
+13. Open dependencies that must be confirmed before code is written
+
+The lifecycle / boot / shutdown is covered in `Sequential_Flow.md`. The broker SDK is covered in `backend/brokers/upstox/__init__.py`. Cross-engine plumbing is in `HLD.md`.
 
 ---
 
 ## 1. The Edge
 
-**Pre-open positioning prices in overnight news.** When the market opens, premiums diverge from that baseline as flow comes in. We measure the divergence on a small basket of liquid ITM strikes and ride the side that moves first. We flip when the other side decisively overtakes.
+**Read the order book, not the price.**
 
-Inputs that drive the strategy:
+The premium-diff strategy waited for trades to print, then measured how far the printed premium had moved from a pre-open baseline. That edge has two structural problems on a retail feed:
 
-- **Pre-open premium snapshot** captured at 09:14:50 IST per basket strike (immutable for the day).
-- **Live WebSocket tick stream** carrying current premium, bid, ask, volume per strike.
-- **Spot LTP** for ATM tracking (used for the ΔPCR strike-set re-centering only).
+- It needs liquidity *on the basket strikes specifically*. If pre-open chosen strikes go silent for the day (real failure mode observed in production), the strategy sees zero movement and emits zero signals — even when other strikes are screaming.
+- It is reactive: by the time a trade prints at the new price, the move is partially over.
 
-Inputs we **do not** use on the hot path:
+The bid/ask imbalance strategy reads the **resting order book** (bid/ask quantities at multiple depth levels) instead of executed trades. Order book updates arrive even when no trade prints. Pressure builds on the book *before* it shows in price. This is the moat.
 
-- **Open interest** — NSE refreshes OI every ~3 min; too slow for live entry/exit decisions. Used only by the optional ΔPCR overlay.
-- **Greeks** — informative for dashboards, not used in decisions.
-- **Historical candles** — unused at runtime; backtesting only.
+**Edge components:**
 
----
+- **Order book pressure** — `ΣBidQty / ΣAskQty` on a per-strike and cumulative basis tells us whether buyers or sellers are accumulating depth.
+- **Aggressor detection** — LTP near the ask = aggressive buying lifting offers; near the bid = aggressive selling hitting bids.
+- **Ask wall absorption** — large resting ask quantity being eaten by buyers is a high-conviction breakout signal. A wall *not* being absorbed is a high-conviction "do not enter" signal.
+- **Tick-speed confirmation** — three consecutive upticks within one second filter single-tick noise.
+- **Reversal detection** — sudden imbalance collapse + spread widening + ask wall reformation flags exhaustion before price reverses.
 
-## 2. Per-Index Specification
+We **do not** use:
 
-Both indexes run as **identical, independent strategy instances**. They share only:
+- Open interest on the hot path (NSE refreshes OI ~3 min — far too slow)
+- Greeks (informational only; not actionable at this latency)
+- Historical candles (backtest only; runtime trades on live order flow)
+- The premium-diff baseline (replaced entirely)
 
-- The global daily-loss circuit (across both).
-- The order execution layer.
-- The same broker connection.
-
-Otherwise: separate state, separate basket, separate position, separate ΔPCR.
-
-| Index | Exchange | Strike Step | Lot Size | Expiry Cadence | Reversal Threshold |
-|---|---|---|---|---|---|
-| **NIFTY 50** | NSE | 50 | 75 | Weekly (Tuesday) | ₹20 |
-| **BANKNIFTY** | NSE | 100 | 35 | Monthly (last Tuesday) | ₹40 |
-
-All instrument-specific values (strike step, lot size, current expiry token) are read live from the broker at startup via `UpstoxAPI.get_option_contracts(...)` → `nearest_expiry(...)`. The defaults above are for reference. Reversal thresholds are configurable per index.
+**Honest constraint to bake into expectations**: the alpha is real but smaller than backtests will suggest because Upstox retail depth has 50–200 ms lag versus HFTs. The edge half-life is short. Reaction speed is the entire moat — so the architecture is event-driven, not polled, end to end.
 
 ---
 
-## 3. Per-Index State Machine
+## 2. Engine Architecture
+
+### 2.1 One process, N vessels
+
+The strategy engine (`pcr-strategy`) is a single Python process running a single asyncio event loop. Inside that loop, **N strategy vessels** run concurrently as cooperating coroutines. Each vessel is one `(strategy_id, instrument_id)` pair with its own config, its own basket, its own state, and its own decision loop.
+
+```
+pcr-strategy process (single asyncio event loop, uvloop)
+├── tick_subscriber_task         ← Redis pub/sub on tick.{token}, fans dirty flags
+├── vessel_bid_ask_imbalance_nifty50      ← awaits dirty.set()
+├── vessel_bid_ask_imbalance_banknifty    ← awaits dirty.set()
+├── (future) vessel_bid_ask_imbalance_sensex
+├── (future) vessel_some_new_strategy_nifty50    ← same instrument, different strategy = no problem
+├── signal_publisher_task        ← drains signal queue → strategy:stream:signals
+└── health_heartbeat_task        ← writes heartbeat every 5 s per vessel
+```
+
+At today's launch the engine runs **two vessels** (one per index, both running the bid/ask imbalance strategy). The architecture is built so adding a third strategy on the same instrument, or the same strategy on SENSEX, is a config change — not a code change.
+
+### 2.2 Why async, not threads
+
+- **Idle vessels consume zero CPU.** A vessel with no pending tick suspends on `await dirty.wait()` and is parked at the kernel level. The OS schedules it back when the event arrives.
+- **No locks, no race conditions.** Cooperative multitasking on a single thread eliminates the entire class of concurrency bugs.
+- **Shared market data is read from Redis on every evaluation.** No in-process state crosses vessel boundaries. Vessels are fully independent — adding, removing, or crashing one cannot affect siblings.
+- **Compute frequency is naturally bounded by compute time itself.** Eval takes ~0.5–1 ms. If 100 ticks land in 1 s, the vessel runs ~100 evals on the freshest state per tick batch, with multiple ticks coalesced into one eval whenever they overlap with an in-progress compute.
+
+### 2.3 Tick-driven evaluation with implicit coalescing
+
+Every vessel uses this loop:
+
+```
+asyncio.Event flag = "dirty"
+
+on tick notification (pub/sub from data-pipeline):
+    dirty.set()                  # idempotent
+
+vessel loop:
+    while True:
+        await dirty.wait()       # blocks at 0% CPU when idle
+        dirty.clear()            # reset BEFORE reading state
+        snapshot = read all monitored tokens from Redis
+        update rolling buffer (vessel-local memory)
+        decision = evaluate(snapshot, buffer)
+        if decision: emit signal
+```
+
+**No artificial floor**, no 200 ms timer, no polling. Compute fires the moment a tick arrives. If multiple ticks arrive while compute is running, they all set the (already true) flag — the next loop iteration picks up the freshest state in one read. Coalescing happens for free.
+
+**Order-book latency is dominated by the broker (50–200 ms). Vessel adds <1 ms.**
+
+### 2.4 Multi-vessel data sharing
+
+The vessels do *not* share in-process state with each other. The only shared resource is the WebSocket subscription set, and that is owned by `pcr-data-pipeline`. The data path is:
+
+```
+broker WS  →  pcr-data-pipeline  →  Redis (option_chain, depth, spot)
+                                          ↓
+                                          ↓  PUBLISH tick.{token}
+                                          ↓
+            ┌─────────────────────────────┼─────────────────────────────┐
+            ↓                             ↓                             ↓
+       vessel A reads               vessel B reads                vessel C reads
+       (NIFTY)                       (BANKNIFTY)                  (SENSEX)
+```
+
+The data-pipeline is responsible for ensuring that all tokens any vessel needs are subscribed (union of vessel basket sets). The vessels themselves never talk to the broker.
+
+---
+
+## 3. Strike Basket + Dynamic ATM
+
+### 3.1 Pre-open basket
+
+At engine startup (08:00 IST, before market open), each vessel:
+
+1. Loads its instrument's strike step + lot size from broker via `UpstoxAPI.get_option_contracts(...)`.
+2. Picks the nearest expiry (weekly NIFTY / monthly BANKNIFTY) using `nearest_expiry(...)`.
+3. Reads spot LTP, computes initial ATM = round(spot / step) × step.
+4. Builds the initial basket of N CE strikes + N PE strikes around ATM (default N=5; configurable per instrument).
+5. Pushes the union of basket tokens to `market_data:subscriptions:desired` so the data-pipeline subscribes them.
+6. Waits for the data-pipeline to confirm all basket tokens are first-framed.
+
+### 3.2 Dynamic ATM shift (every tick)
+
+The vessel's basket is **not** locked at pre-open. On every spot tick the vessel checks:
+
+```
+new_atm = round(current_spot / strike_step) * strike_step
+if new_atm != current_atm:
+    add_strikes = new_atm-side strikes not yet in basket
+    drop_strikes = old basket strikes more than N steps from new_atm
+    push add_strikes to market_data:subscriptions:desired
+    remove drop_strikes from market_data:subscriptions:desired
+    update vessel's monitored basket
+    log basket shift event
+```
+
+The data-pipeline reconciles its WS subscription set whenever `desired` changes. Newly added strikes start streaming within ~1 s. Dropped strikes stop streaming and are released.
+
+This kills the failure mode we hit on 2026-05-07 (basket strikes locked at pre-open, market liquidity moved elsewhere, strategy stranded).
+
+**Strike step + basket size per instrument:**
+
+| Instrument | Strike Step | Normal Basket | Expiry-Day Basket |
+|---|---|---|---|
+| NIFTY 50 | 50 | ATM ± 5 | ATM ± 7 |
+| BANKNIFTY | 100 | ATM ± 5 | ATM ± 7 to ± 10 |
+| SENSEX (future) | 100 | ATM ± 3 | ATM ± 5 to ± 7 |
+
+Basket size is configurable. The expiry-day expansion is automatic when `expiry == today`.
+
+### 3.3 Thrash protection
+
+ATM shift triggers basket churn. To prevent rapid back-and-forth on a strike-boundary chop:
+
+- A shift is committed only if `|spot - last_shift_spot| ≥ strike_step` (already implied above).
+- After a shift, the next shift is allowed only after a 5-second hysteresis window.
+
+This is a config knob, not hardcoded.
+
+---
+
+## 4. The Eight Atomic Metrics
+
+Every decision is built from these eight metrics. Each is computed in its own module (Section 8).
+
+### 4.1 Per-strike imbalance ratio
+
+```
+imbalance(strike) = ΣBidQty(strike) / ΣAskQty(strike)
+```
+
+Σ is the sum across the depth levels exposed by the broker (typically 5). Computed for every strike in the basket on every tick that touches that strike.
+
+| Range | Classification |
+|---|---|
+| > 1.30 | Strong Buyers |
+| 1.10 – 1.30 | Moderate Buyers |
+| 0.90 – 1.10 | Neutral |
+| 0.70 – 0.90 | Moderate Sellers |
+| < 0.70 | Strong Sellers |
+
+### 4.2 Spread
+
+```
+spread(strike) = best_ask_price - best_bid_price
+```
+
+Per-instrument thresholds:
+
+| Instrument | Good | Moderate | Avoid Entry |
+|---|---|---|---|
+| NIFTY 50 | ≤ 0.50 | 0.50 – 1.00 | > 1.00 |
+| BANKNIFTY | ≤ 1.50 | 1.50 – 3.00 | > 3.00 |
+| SENSEX | ≤ 1.00 | 1.00 – 2.00 | > 2.00 |
+
+### 4.3 Ask wall detection
+
+```
+ask_wall_present(strike) = (best_ask_qty > 5 × best_bid_qty)
+```
+
+Three sub-states inferred from the rolling buffer (last ~10 ticks for that strike):
+
+- **HOLDING** — wall_qty has not decreased over the last 5 ticks. Acts as resistance; do not enter aggressively.
+- **ABSORBING** — wall_qty is monotonically decreasing AND LTP is near ask AND bid_qty is rising. High-conviction breakout signal.
+- **REFRESHING** — wall_qty resets to ~original size after each absorption attempt. Hidden algorithmic seller; *stronger* than HOLDING. Hard exit signal for any in-flight CE position on this strike.
+
+### 4.4 LTP aggressor detection
+
+```
+if LTP >= best_ask - tolerance:  aggressive_buying = True
+if LTP <= best_bid + tolerance:  aggressive_selling = True
+```
+
+Tolerance is `0.10` INR by default, instrument-overrideable.
+
+### 4.5 Tick speed (consecutive direction)
+
+Maintain a per-strike rolling buffer of the last 10 ticks (LTP, ts). Compute:
+
+```
+consecutive_upticks = max k such that LTP[-1] > LTP[-2] > ... > LTP[-k]
+                                    AND ts[-1] - ts[-k] <= 1000 ms
+consecutive_downticks = symmetric
+```
+
+`strong_momentum_up = (consecutive_upticks >= 3)` and similarly for down.
+
+### 4.6 Cumulative CE / PE imbalance
+
+```
+cum_ce_imbalance = Σ(BidQty across all CE strikes in basket) / Σ(AskQty across all CE strikes)
+cum_pe_imbalance = Σ(BidQty across all PE strikes in basket) / Σ(AskQty across all PE strikes)
+```
+
+This is the per-side aggregate. Smooths single-strike noise.
+
+### 4.7 Net pressure
+
+```
+net_pressure = cum_ce_imbalance - cum_pe_imbalance
+```
+
+The composite directional reading.
+
+| Range | Interpretation | Trade Direction |
+|---|---|---|
+| > +0.50 | Bullish dominance | CE BUY eligible |
+| -0.20 to +0.20 | Neutral | No entry |
+| < -0.50 | Bearish dominance | PE BUY eligible |
+| Rapid collapse | Reversal risk | Tighten stops on existing positions |
+
+The `±0.20 to ±0.50` band is "developing" — no entry, but reduce in-trade aggression.
+
+### 4.8 Execution quality score (0–10)
+
+Computed only when a directional candidate exists (i.e., `|net_pressure| > 0.50` and no holding ask wall on the chosen side).
+
+| Condition | Points |
+|---|---|
+| Spread within "Good" range | +2 |
+| Imbalance on chosen-side dominant strike > 1.30 | +2 |
+| Ask wall on chosen side ABSENT or ABSORBING | +2 |
+| 3+ consecutive upticks (CE) or downticks (PE) on chosen-side dominant strike within 1 s | +2 |
+| LTP near ask (CE) or near bid (PE) on chosen-side dominant strike | +2 |
+| **Maximum** | **10** |
+
+Score interpretation:
+
+| Score | Action |
+|---|---|
+| 8 – 10 | Aggressive entry — market order or near-ask limit |
+| 5 – 7 | Moderate entry — limit at mid; 50% of normal qty |
+| < 5 | No entry — insufficient confirmation |
+
+---
+
+## 5. Decision Logic
+
+### 5.1 Per-tick decision flow
+
+```mermaid
+flowchart TD
+    A[tick arrives] --> B[update rolling buffer]
+    B --> C[compute 8 metrics]
+    C --> D{vessel state?}
+    D -->|FLAT| E[evaluate entry gates]
+    D -->|IN_CE or IN_PE| F[evaluate continuation + reversal]
+    E --> G{4 gates pass?}
+    G -->|yes| H[emit ENTRY signal]
+    G -->|no| I[no-op, write metrics]
+    F --> J{reversal warning?}
+    J -->|yes| K[emit EXIT or FLIP signal]
+    J -->|no| L{continuation OK?}
+    L -->|yes| M[hold; write metrics]
+    L -->|no| N[emit EXIT signal]
+```
+
+Every tick produces a logged decision event, even if the action is "no-op". This is what makes silent-loop bugs (the NIFTY failure today) impossible — if the vessel is alive, it is writing decision telemetry every tick.
+
+### 5.2 Entry — the 4-gate sequence
+
+A FLAT vessel checks gates in order. Failing any gate aborts the entry attempt.
+
+```
+Gate 1 — Direction
+    if abs(net_pressure) <= 0.50 → no entry
+    side = CE if net_pressure > 0.50 else PE
+
+Gate 2 — Ask Wall (CE entry) / Bid Wall (PE entry)
+    inspect chosen-side dominant strike (highest imbalance)
+    if wall is HOLDING or REFRESHING → no entry
+    if wall is ABSORBING → proceed; this is bullish
+    if no wall → proceed
+
+Gate 3 — Spread
+    spread on chosen strike must be in "Good" range
+    if "Moderate" → reduce qty by 50% (passes but flagged)
+    if "Avoid" → no entry
+
+Gate 4 — Quality Score
+    score = compute_score(side, chosen_strike)
+    if score < threshold_for_current_time_window → no entry
+    if score in 5-7 → enter half-size, limit at mid
+    if score in 8-10 → enter full-size, market or near-ask
+```
+
+The gate evaluations all read from the same metrics already computed in step 4.x — no extra computation.
+
+### 5.3 Continuation logic (in-trade)
+
+When the vessel is `IN_CE` or `IN_PE`, every tick re-evaluates whether to keep holding.
+
+**For an open CE position, hold if all of:**
+
+- `imbalance(held_strike) > 1.20`
+- Bid quantity at held strike is non-decreasing over last 5 ticks
+- Any ask wall on held strike is ABSENT or ABSORBING (never HOLDING/REFRESHING)
+- Spread within Good or Moderate range
+- LTP within 0.10 INR of best ask (still aggressive buying)
+
+**Symmetric for PE.** Failure of any condition is a soft exit signal — the trailing stop tightens by one step but no immediate market exit. Two consecutive ticks failing → hard exit signal.
+
+### 5.4 Reversal warning
+
+The most important — and most twitchy — signal. Triggers only when **all** of the following are simultaneously true:
+
+```
+imbalance_drop_pct > 30% over last 3 ticks
+AND ask_wall on previously-buying side is now HOLDING or REFRESHING
+AND spread has widened beyond Moderate range
+AND LTP has moved from near-ask to near-bid (or vice versa for PE positions)
+```
+
+When triggered:
+
+- If currently FLAT → emit "reversal warning" telemetry; suppress entries for 30 seconds
+- If currently in a position → emit FLIP signal (exit + immediate re-entry on opposite side, subject to all 4 gates again)
+
+The 4-of-4 conjunction is intentionally strict. Order-book data is noisy; firing a flip on any single condition would whipsaw badly.
+
+### 5.5 Vessel state machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> FLAT
-    FLAT --> IN_CE: BUY CE signal
-    FLAT --> IN_PE: BUY PE signal
-    IN_CE --> FLAT: exit (SL / target / TSL / time / liq / EOD)
-    IN_PE --> FLAT: exit (SL / target / TSL / time / liq / EOD)
-    IN_CE --> IN_PE: reversal flip
-    IN_PE --> IN_CE: reversal flip
-    FLAT --> COOLDOWN: post-SL / post-flip
+    FLAT --> IN_CE: ENTRY signal CE
+    FLAT --> IN_PE: ENTRY signal PE
+    IN_CE --> FLAT: EXIT signal
+    IN_PE --> FLAT: EXIT signal
+    IN_CE --> IN_PE: FLIP signal
+    IN_PE --> IN_CE: FLIP signal
+    FLAT --> COOLDOWN: post-SL exit
     COOLDOWN --> FLAT: cooldown_expires
     FLAT --> HALTED: daily_loss_circuit / pre_open_invalid / manual_halt
     IN_CE --> HALTED: daily_loss_circuit
@@ -71,656 +395,498 @@ stateDiagram-v2
     HALTED --> [*]: end of day
 ```
 
-| State | Meaning | Permitted actions |
-|---|---|---|
-| **FLAT** | No open position; ready to enter | Read ticks, evaluate entry decision tree |
-| **IN_CE** | Holding a CE position | Evaluate exit cascade; evaluate reversal flip to PE |
-| **IN_PE** | Holding a PE position | Evaluate exit cascade; evaluate reversal flip to CE |
-| **COOLDOWN** | Just exited; lockout active | Read ticks (for telemetry) but emit no signals |
-| **HALTED** | Day stopped (circuit / invalid / manual) | Emit no signals; existing position force-exited if circuit; idle until 15:15 EOD reset |
-
-**Persistence**: state is in `strategy:{index}:state` (single STRING). On engine restart, the strategy re-reads it and resumes. `IN_CE` / `IN_PE` restart additionally reads `current_position_id` and consults Order Exec for the open trade's status.
+State is per-vessel (i.e. per `(strategy_id, instrument_id)`). NIFTY can be `IN_CE` while BANKNIFTY is `IN_PE`. The order-execution allocator (separate concern, unchanged) enforces the global concurrency cap.
 
 ---
 
-## 4. Trading Basket and Subscription Range
+## 6. Time-of-Day Windowing
 
-### 4.1 The trading basket (locked at 09:15)
+Different intraday periods have different liquidity profiles and risk. The minimum quality score required for entry varies:
 
-Six strikes per index, fixed for the day:
-
-| Side | Strikes |
-|---|---|
-| **CE basket** | ATM, ATM−1step, ATM−2step (ITM calls; gain when index rises) |
-| **PE basket** | ATM, ATM+1step, ATM+2step (ITM puts; gain when index falls) |
-
-`ATM at 09:15 = round(spot / strike_step) × strike_step` using the spot LTP from the first tick at/after 09:15:00.
-
-The basket **does not change** for the rest of the day, even if spot drifts. This is intentional: the diff signal is meaningful only when measured against the *same* strikes whose pre-open baseline we captured.
-
-ITM-bias rationale:
-- Higher delta (~0.55–0.85) → premium responds more 1:1 to spot.
-- Tighter spreads → cleaner execution.
-- Less time-decay shock vs OTM at intraday horizons.
-
-### 4.2 Subscription range (ATM ± 6, dynamic re-centering)
-
-| Range | Purpose |
-|---|---|
-| **Trading basket: ATM ± 2** | 6 strikes — the locked decision set |
-| **ΔPCR set: ATM ± 2 (dynamic)** | 5 strikes — re-centers on spot drift |
-| **Safety buffer: ±4 more strikes** | Absorbs intraday ATM drift without re-subscribing under load |
-| **Total per index** | 13 CE + 13 PE = 26 contracts + 1 spot = 27 keys |
-| **Total across both indexes** | 54 WS subscriptions |
-
-Subscription happens at **09:14:00** so quotes are flowing before the 09:14:50 snapshot. The subscription manager keeps the window centered as spot moves: subscribe new edge strikes proactively, unsubscribe ones now too far out, never let the window drop below ATM ± 6.
-
-### 4.3 Pre-open snapshot (09:14:50)
-
-Per index, for each of the 6 trading-basket strikes, capture and persist as immutable baseline:
-
-- `pre_open_premium` — last traded price in the pre-open session
-- `bid` and `ask`
-- `oi` (informational; not used in hot-path decisions)
-
-For the ATM ± 2 ΔPCR set: capture baseline OI for both calls and puts (informational).
-
-**Validation gate** (per index):
-- If any of the 6 trading-basket strikes has `ts == 0` (no pre-open trade ever recorded for that contract) → **set `strategy:{index}:enabled = false` for the day**, alert WARN, and proceed without that index. The other index continues independently.
-- This is the fail-closed behavior already mandated by `Sequential_Flow.md` §10.
-
----
-
-## 5. The Continuous Decision Loop
-
-The strategy runs one thread per index. Each thread blocks on the per-index tick stream `market:stream:tick:{index}` and runs this loop:
-
-```python
-state = read("strategy:{index}:state")          # FLAT | IN_CE | IN_PE | COOLDOWN | HALTED
-basket = read("strategy:{index}:basket")        # locked 6 strikes
-pre_open = read("strategy:{index}:pre_open")    # immutable baseline
-
-for tick in tick_stream:
-    if state == HALTED:
-        continue                                # no action; just drain the stream
-
-    if state == COOLDOWN:
-        if cooldown_expired():
-            state = FLAT
-            persist(state)
-        else:
-            continue
-
-    diffs = compute_diffs(tick, basket, pre_open)        # per-strike Δ vs baseline
-    sum_ce, sum_pe = aggregate(diffs)
-    delta = sum_pe - sum_ce                              # signed flip indicator
-    persist_live_view(diffs, sum_ce, sum_pe, delta)
-
-    if state == FLAT:
-        signal = evaluate_entry(sum_ce, sum_pe, delta, diffs)
-        if signal:
-            emit_signal(signal)
-            state = "ENTRY_PENDING"                       # transient; cleared by Order Exec
-    else:                                                # IN_CE or IN_PE
-        exit_signal = evaluate_exit_cascade(...)
-        if exit_signal:
-            emit_signal(exit_signal)
-        else:
-            flip_signal = evaluate_reversal(state, delta)
-            if flip_signal:
-                emit_signal(flip_signal)
-```
-
-Every signal is idempotent — keyed by `sig_id = sha256(index | tick_seq | side | strike | intent)`. Order Exec deduplicates on `sig_id` before submitting to the broker.
-
----
-
-## 6. Entry Decision (when state = FLAT)
-
-```mermaid
-flowchart TD
-    A[Tick arrives, state=FLAT] --> B[Compute SUM_CE, SUM_PE, delta = SUM_PE - SUM_CE]
-    B --> C{SUM_CE > 0?}
-    B --> D{SUM_PE > 0?}
-
-    C -- yes --> CD{SUM_PE > 0?}
-    C -- no  --> CN{SUM_PE > 0?}
-
-    CN -- yes --> E[BUY PE — pick PE strike with highest Diff]
-    CN -- no  --> WAIT[both negative → WAIT for one to cross +reversal_threshold]
-
-    CD -- no  --> F[BUY CE — pick CE strike with highest Diff]
-    CD -- yes --> G{abs delta > entry_dominance_threshold?}
-    G -- yes, delta > 0 --> E
-    G -- yes, delta < 0 --> F
-    G -- no  --> H[ambiguous → WAIT]
-
-    E --> ENTRY[emit signal: BUY PE]
-    F --> ENTRY2[emit signal: BUY CE]
-    WAIT --> END[no entry this tick]
-    H --> END
-```
-
-### 6.1 Entry rules in plain English
-
-| Condition                                            | Action                                        |
-| ---------------------------------------------------- | --------------------------------------------- |
-| `SUM_CE > 0` AND `SUM_PE ≤ 0`                        | **BUY CE** on highest-Diff CE strike          |
-| `SUM_PE > 0` AND `SUM_CE ≤ 0`                        | **BUY PE** on highest-Diff PE strike          |
-| Both > 0 AND `\|delta\| > entry_dominance_threshold` | Enter dominant side (sign of delta)           |
-| Both > 0 AND `\|delta\| ≤ entry_dominance_threshold` | **WAIT** — ambiguous                          |
-| Both ≤ 0                                             | **WAIT** — both-negative recovery rule (§6.2) |
-
-`entry_dominance_threshold` = same as the index's `reversal_threshold_inr` (₹20 NIFTY / ₹40 BANKNIFTY) by default. Configurable separately if needed.
-
-### 6.2 Both-negative recovery
-
-When both SUMs are below zero, neither side has shown positive divergence vs pre-open. The strategy waits. The first side whose SUM crosses **+reversal_threshold** above zero triggers an entry on that side. This filters out the early-session noise where premiums drift below pre-open due to spread widening or thin liquidity, then recover.
-
-### 6.3 Strike pick within a basket
-
-Among the 3 strikes of the chosen basket, pick the one with the **highest individual Diff in absolute rupee terms**. This is a measure of which strike is leading the move. (Volume- or delta-weighted alternatives are out of scope for v1.)
-
-### 6.4 Entry freeze near close
-
-From **15:10 to 15:15** (5-minute pre-EOD window): no new entries. Existing trades continue to be managed; everything force-exits at 15:15.
-
-### 6.5 Daily entry cap
-
-Per index per day:
-- Max **8 entries** total (initial + post-cooldown re-entries + reversal flips).
-- Max **4 reversal flips**.
-
-Reaching either cap → state stays FLAT but no new signals emit for the rest of the day; existing trade (if any) still managed normally.
-
----
-
-## 7. Exit Decision (when state = IN_CE or IN_PE)
-
-Eight triggers, evaluated **every tick** in this strict priority order. The first to fire wins — others are ignored on that tick.
-
-```mermaid
-flowchart TD
-    A[Tick arrives, state=IN_*] --> P1{Daily Loss Circuit hit?}
-    P1 -- yes --> X1[FORCE EXIT all positions both indexes; HALT entries day-wide]
-    P1 -- no  --> P2{Time >= 15:15?}
-    P2 -- yes --> X2[EOD square-off — force exit all]
-    P2 -- no  --> P3{Premium <= entry × 1 - sl_pct?}
-    P3 -- yes --> X3[Hard Stop Loss exit]
-    P3 -- no  --> P4{Premium >= entry × 1 + target_pct?}
-    P4 -- yes --> X4[Hard Profit Target exit]
-    P4 -- no  --> P5{TSL armed AND Premium <= peak × 1 - tsl_trail_pct?}
-    P5 -- yes --> X5[Trailing Stop Loss exit]
-    P5 -- no  --> P6{Spread > spread_skip_pct AND time < 15:00?}
-    P6 -- yes --> X6[Liquidity exit]
-    P6 -- no  --> P7{Time-in-trade >= max_hold_minutes?}
-    P7 -- yes --> X7[Time exit]
-    P7 -- no  --> P8{Reversal condition?}
-    P8 -- yes --> X8[Reversal flip — exit then enter opposite]
-    P8 -- no  --> A
-```
-
-### 7.1 Exit triggers
-
-| # | Trigger | Default | Condition |
+| Window | Phase | Min Score | Rationale |
 |---|---|---|---|
-| 1 | **Daily Loss Circuit** | −8% of capital | `cumulative_day_pnl ≤ −daily_loss_circuit_pct × trading_capital` |
-| 2 | **EOD Square-Off** | 15:15 IST | `now ≥ session.eod_squareoff` |
-| 3 | **Hard Stop Loss** | −20% of premium | `current_premium ≤ entry_premium × (1 − sl_pct)` |
-| 4 | **Hard Profit Target** | +50% of premium | `current_premium ≥ entry_premium × (1 + target_pct)` |
-| 5 | **Trailing Stop Loss** | armed at +15%, trails 5% off peak | `tsl_armed AND current_premium ≤ peak_premium × (1 − tsl_trail_pct)` |
-| 6 | **Liquidity Exit** | spread > 5% of LTP | `(ask − bid) / ltp > spread_skip_pct` AND `now < 15:00` (don't trigger on EOD spread widening) |
-| 7 | **Time Exit** | 25 min | `now − entry_time ≥ max_hold_minutes` |
-| 8 | **Reversal Flip** | per-index threshold | see §8 |
+| 09:15 – 09:30 | Opening | 8 | Highest noise; only obvious setups |
+| 09:30 – 11:30 | Primary intraday | 6 | Cleanest order flow; relax threshold |
+| 11:30 – 13:30 | Mid-session | 7 | Lunch-hour low liquidity; tighten |
+| 13:30 – 15:00 | Continuation only | 7 | No new directional bets; allow only continuation entries |
+| 15:00 – 15:30 | Exit only | — | All entries blocked; existing positions managed |
 
-### 7.2 TSL arming & peak tracking
+A "continuation entry" in 13:30–15:00 is an entry on the same side as the most recent exit within 5 minutes — i.e. the vessel exited a CE on a tighter stop, the order book continues to confirm bullish, and a new CE entry on a fresh signal is allowed. Fresh CE entries with no recent CE exit are blocked.
 
-The TSL is **disarmed at entry**. It arms once when premium first reaches `entry_premium × (1 + tsl_arm_pct)`. After arming, `peak_premium` is updated on every tick where `current_premium > peak_premium`. The TSL trigger fires when premium drops to `peak_premium × (1 − tsl_trail_pct)`.
-
-State maintained in `strategy:{index}:position:{...}`:
-- `tsl_armed` — bool
-- `peak_premium` — float
-
-These are read by Order Exec (the actual exit-evaluator) on every tick.
-
-### 7.3 Liquidity exit safe window
-
-Liquidity exit (trigger 6) is **suppressed in the last 15 minutes** of the session (after 15:00). EOD spreads naturally widen as participants exit; an automatic liquidity-exit cascade in the last 15 min would just amplify slippage. Force-exits at 15:15 are pure modify-only loops — they tolerate wide spreads.
+15:00–15:30 force-closes any open position at 15:25 IST. Drain hand-off to `pcr-stop.service` happens at 15:45 IST.
 
 ---
 
-## 8. Reversal Flip
+## 7. Entry / Exit Execution
 
-A reversal is a single transactional intent: **exit current position AND enter opposite-side position** as one atomic plan. Order Exec executes it as a sequenced two-step (exit first, then entry, observably).
+The strategy engine emits **signals** to `strategy:stream:signals`. The order-execution engine (unchanged from current) consumes those signals, places orders via the broker SDK, and manages the order lifecycle.
 
-### 8.1 Trigger
+The signal payload changes (Section 9.4) to carry `strategy_id` end-to-end, enabling per-strategy attribution. Otherwise the order-execution flow is the same: dispatcher tails the stream, 8-worker thread pool, atomic capital + concurrency reservation via the existing Lua allocator.
 
-Define `delta = SUM_PE − SUM_CE` (signed).
+### 7.1 Risk parameters per position
 
-| Current state | Flip condition | Action |
+Read from `strategy:configs:indexes:{instrument}` (one config blob per index):
+
+| Parameter | Default | Description |
 |---|---|---|
-| **IN_CE** | `delta > +reversal_threshold` | Exit CE, then enter PE on highest-Diff PE strike |
-| **IN_PE** | `delta < −reversal_threshold` | Exit PE, then enter CE on highest-Diff CE strike |
+| `qty_lots` | 1 | Lots per entry |
+| `max_entries_per_day` | 8 | Hard cap on entries |
+| `max_reversals_per_day` | 4 | Hard cap on flips |
+| `sl_pct` | 0.20 | Stop loss as fraction of entry premium |
+| `target_pct` | 0.50 | Take profit |
+| `tsl_arm_pct` | 0.15 | Premium gain at which trailing stop arms |
+| `tsl_trail_pct` | 0.05 | Trailing distance |
+| `max_hold_sec` | 1500 | Time-based exit (25 min) |
+| `post_sl_cooldown_sec` | 60 | Cooldown after stop hit |
+| `post_reversal_cooldown_sec` | 90 | Cooldown after flip |
 
-### 8.2 Atomicity
+These mirror the previous strategy. The exit cascade itself (SL / target / TSL / time / liquidity / EOD) is inherited and unchanged.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant St as Strategy
-    participant Redis
-    participant OE as Order Exec
-    participant Br as Broker
+---
 
-    St->>St: tick: in IN_CE, delta > +threshold
-    St->>Redis: emit single signal {intent: REVERSAL_FLIP, exit_pos_id, new_side, new_strike}
-    OE->>Redis: XREADGROUP signals
-    OE->>Br: Phase A — submit exit limit (modify-only loop)
-    Br-->>OE: exit FILLED
-    OE->>Br: Phase B — submit entry limit (entry monitor loop)
-    alt entry FILLED
-        OE->>Redis: cleanup old position; create new position {state=IN_PE}
-        OE->>Redis: persist strategy:{idx}:state = IN_PE
-        OE->>Redis: trigger COOLDOWN for reversal_cooldown_seconds
-    else entry abandoned (drift > chase_ceiling / open_timeout)
-        OE->>Redis: cleanup old position
-        OE->>Redis: persist strategy:{idx}:state = COOLDOWN
-        OE->>Redis: alert WARN "flip degraded to exit-only"
-    end
+## 8. Module Layout
+
+The directory structure below maps 1:1 to the section structure of this doc. Each module is a separate file with a single clear responsibility.
+
+```
+backend/engines/strategy/
+├── __init__.py
+├── __main__.py                    # python -m engines.strategy
+├── main.py                        # bootstrap: registry → spawn vessels → wait for shutdown
+│
+├── runner.py                      # StrategyVessel: lifecycle (BOOT / PRE_OPEN / SETTLE / LIVE / DRAIN)
+├── registry.py                    # discover registered strategies + vessel definitions from config
+├── ingestion.py                   # Redis pub/sub subscriber → fan-out dirty events to vessels
+├── publisher.py                   # signal queue → strategy:stream:signals (XADD)
+├── heartbeat.py                   # per-vessel heartbeat to system:health:heartbeats
+│
+├── strategies/
+│   ├── __init__.py
+│   ├── base.py                    # abstract Strategy interface: prepare(), evaluate(snapshot) -> Action
+│   │
+│   └── bid_ask_imbalance/
+│       ├── __init__.py
+│       ├── strategy.py            # BidAskImbalanceStrategy — orchestrates everything below
+│       │
+│       ├── basket.py              # §3 — initial basket build + dynamic ATM shift
+│       ├── snapshot.py            # §2.3 — read all basket tokens from Redis into a typed snapshot
+│       ├── buffer.py              # §4.5 — per-strike rolling tick buffer (in-memory ring)
+│       │
+│       ├── metrics/
+│       │   ├── __init__.py
+│       │   ├── imbalance.py       # §4.1 — per-strike imbalance ratio
+│       │   ├── spread.py          # §4.2 — spread classification
+│       │   ├── ask_wall.py        # §4.3 — wall detection + sub-state classification
+│       │   ├── aggressor.py       # §4.4 — LTP-vs-bid/ask classification
+│       │   ├── tick_speed.py      # §4.5 — consecutive-direction streak
+│       │   ├── cumulative.py      # §4.6 — cum CE / cum PE imbalance
+│       │   ├── pressure.py        # §4.7 — net pressure
+│       │   └── quality_score.py   # §4.8 — 0–10 score
+│       │
+│       ├── decisions/
+│       │   ├── __init__.py
+│       │   ├── entry_gates.py     # §5.2 — 4-gate sequence
+│       │   ├── continuation.py    # §5.3 — in-trade hold logic
+│       │   ├── reversal.py        # §5.4 — reversal warning + flip
+│       │   └── timing.py          # §6 — time-of-day score thresholds
+│       │
+│       └── state.py               # §5.5 — vessel state machine; cooldowns; daily counters
+│
+└── observability/
+    ├── __init__.py
+    ├── live_display.py            # §11 — formatted log block (the "CMD output" from the spec)
+    └── decision_log.py            # §11 — structured decision telemetry per tick
 ```
 
-Strategy never emits a *new* entry while a flip is in flight. The signal is one logical unit; Order Exec owns the two-phase execution and the final state transition.
+Every metric file exports one pure function: takes inputs, returns a value or classification. No I/O, no Redis, no logging — pure computation, fully unit-testable.
 
-### 8.3 Reversal cooldown
+Every decision file takes the metrics output + vessel state and returns an `Action` (NO_OP, ENTER, HOLD, EXIT, FLIP). Also pure.
 
-After a successful flip OR a degraded flip-to-flat, the index enters **COOLDOWN** for `reversal_cooldown_seconds` (default 90s). No new signals during cooldown.
+The vessel runner does all the I/O — reads Redis, writes telemetry, emits signals to the publisher.
 
-### 8.4 Reversal cap
+This separation means:
 
-Max **4 reversal flips per index per day**. The 5th flip condition is ignored (the position is held to its other exits).
-
----
-
-## 9. Cooldowns Summary
-
-| Cooldown | Trigger | Duration | What's blocked |
-|---|---|---|---|
-| **Post-SL cooldown** | Hard SL exit | 60s | New entries on this index |
-| **Post-reversal cooldown** | Reversal flip (success or degraded) | 90s | New entries AND new flips on this index |
-| **Post-target / TSL / time exit** | Normal exits | None | Re-entry allowed immediately on next valid signal |
-
-Cooldown state lives in `strategy:{index}:cooldown_until_ts`. The state machine reads it once per tick and transitions COOLDOWN → FLAT when expired.
+- A new metric is one new file in `metrics/`
+- A new decision rule is one new file in `decisions/`
+- A new strategy entirely is one new directory under `strategies/`
+- A unit test for any single piece needs no Redis, no broker, no engine
 
 ---
 
-## 10. Order Execution Flow (full path: signal → cleanup)
+## 9. Schema
 
-This is the engine-side path. Strategy emits one signal; Order Exec carries it through six stages.
+### 9.1 Redis namespace changes
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant St as Strategy
-    participant SR as orders:stream:signals
-    participant OE as Order Exec worker
-    participant BR as Broker REST (v3 HFT)
-    participant PWS as Portfolio WS (broker)
-    participant PG as Postgres
+The `strategy:*` namespace is reorganized to support multiple `(strategy_id, instrument_id)` vessels.
 
-    St->>SR: XADD signal
-    OE->>SR: XREADGROUP signal
-    Note over OE: STAGE A — pre-trade gates
-    OE->>OE: read trading_active, kill_switch, daily_loss_circuit, allocator
-    OE->>OE: spread filter, depth check, circuit-limit check
-    alt any gate fails
-        OE->>SR: XADD orders:stream:rejected_signals
-        OE->>PG: INSERT trades_rejected_signals
-        Note over OE: STOP — no order placed
-    end
+**New keys:**
 
-    Note over OE: STAGE B — entry submit
-    OE->>OE: status = ENTRY_SUBMITTING; price = best_ask + buffer
-    OE->>BR: place_order (DAY LIMIT, slice=true)
-    BR-->>OE: order_id
-    OE->>OE: status = ENTRY_OPEN
+| Key | Type | Description |
+|---|---|---|
+| `strategy:registry` | SET | Set of `{strategy_id}:{instrument_id}` pairs currently active |
+| `strategy:{sid}:{idx}:state` | STRING | One of `FLAT`, `IN_CE`, `IN_PE`, `COOLDOWN`, `HALTED` |
+| `strategy:{sid}:{idx}:phase` | STRING | One of `BOOT`, `PRE_OPEN`, `SETTLE`, `LIVE`, `DRAIN` |
+| `strategy:{sid}:{idx}:phase_entered_ts` | STRING (ms) | When current phase started |
+| `strategy:{sid}:{idx}:basket` | STRING (JSON) | `{"ce":[tok,...], "pe":[tok,...], "atm": int}` |
+| `strategy:{sid}:{idx}:enabled` | STRING | `"true"` / `"false"` |
+| `strategy:{sid}:{idx}:current_position_id` | STRING | Empty if FLAT |
+| `strategy:{sid}:{idx}:cooldown_until_ts` | STRING (ms) | 0 if not in cooldown |
+| `strategy:{sid}:{idx}:cooldown_reason` | STRING | Last cooldown reason |
+| `strategy:{sid}:{idx}:counters:entries_today` | STRING (int) | Reset at init |
+| `strategy:{sid}:{idx}:counters:reversals_today` | STRING (int) | Reset at init |
+| `strategy:{sid}:{idx}:counters:wins_today` | STRING (int) | Reset at init |
+| `strategy:{sid}:{idx}:metrics:net_pressure` | STRING (float) | Latest computed |
+| `strategy:{sid}:{idx}:metrics:cum_ce_imbalance` | STRING (float) | Latest |
+| `strategy:{sid}:{idx}:metrics:cum_pe_imbalance` | STRING (float) | Latest |
+| `strategy:{sid}:{idx}:metrics:per_strike` | STRING (JSON) | Map of `{token: {imbalance, spread, ltp, wall_state, aggressor, ...}}` |
+| `strategy:{sid}:{idx}:metrics:last_decision` | STRING (JSON) | `{action, score, reason, ts_ms}` for last decision (write every tick) |
+| `strategy:{sid}:{idx}:metrics:last_decision_ts` | STRING (ms) | For staleness alerting |
+| `strategy:configs:strategies:{sid}` | STRING (JSON) | Strategy-level params (thresholds, basket size) |
+| `strategy:configs:strategies:{sid}:instruments:{idx}` | STRING (JSON) | Instrument-overrides (sl_pct, qty, etc.) |
 
-    Note over OE: STAGE C — entry monitor (event-driven via portfolio WS)
-    loop until FILLED or abandoned
-        PWS-->>OE: order update {filled_qty, avg_price, status}
-        OE->>OE: re-evaluate ask drift
-        alt FILLED
-            OE->>OE: status = ENTRY_FILLED
-        else PARTIAL + brief wait elapsed
-            OE->>BR: cancel remainder; continue with filled qty
-        else drift > drift_threshold AND drift < chase_ceiling
-            OE->>BR: modify_order (new price = best_ask + buffer)
-        else drift >= chase_ceiling OR open_timeout
-            OE->>BR: cancel_order
-            OE->>OE: ABANDON signal
-        end
-    end
+**Deprecated keys (delete during migration):**
 
-    Note over OE: STAGE D — exit eval (tick-driven)
-    loop until exit triggered
-        OE->>OE: read current premium, evaluate exit cascade (§7)
-        alt trigger fires
-            break
-        end
-    end
+- `strategy:{idx}:basket` — replaced by namespaced version above
+- `strategy:{idx}:state` — replaced
+- `strategy:{idx}:pre_open` — premium-diff snapshot, no longer used
+- `strategy:{idx}:live:sum_ce` `live:sum_pe` `live:diffs` `live:delta` — premium-diff metrics
+- `strategy:{idx}:delta_pcr:*` — ΔPCR overlay (unused; can be removed cleanly)
+- `strategy:{idx}:counters:*` — re-keyed under namespaced version
+- `strategy:configs:indexes:*` — replaced by per-strategy version
+- `strategy:configs:execution` — kept (order-execution config, not strategy-specific)
+- `strategy:configs:risk` — kept
+- `strategy:configs:session` — kept
 
-    Note over OE: STAGE E — exit submit (modify-only loop)
-    OE->>OE: status = EXIT_SUBMITTING; price = best_bid - buffer
-    OE->>BR: place_order (SELL DAY LIMIT)
-    loop until FILLED  (cannot abandon)
-        PWS-->>OE: order update
-        alt FILLED
-            break
-        else drift
-            OE->>BR: modify_order (new price = best_bid - buffer)
-        end
-    end
+**Stream:**
 
-    Note over OE: STAGE F — reporting + cleanup
-    OE->>OE: build closed_position report (entry, exit, fees via UpstoxAPI.get_brokerage)
-    OE->>PG: INSERT trades_closed_positions
-    OE->>OE: cleanup Redis (cleanup_position.lua atomic)
-    OE->>St: order_events stream emits CLOSED event
-    St->>St: state -> FLAT (or COOLDOWN if SL / reversal)
+- `strategy:stream:signals` — kept; payload schema changes (Section 9.4)
+
+### 9.2 Postgres schema changes
+
+Add `strategy_id TEXT NOT NULL` to:
+
+- `trades_closed_positions`
+- `trades_rejected_signals`
+- `metrics_pnl_history`
+- `metrics_order_events`
+
+Drop:
+
+- `metrics_delta_pcr_history` (entire table — premium-diff overlay)
+
+New table `strategy_definitions`:
+
+```sql
+CREATE TABLE strategy_definitions (
+    strategy_id     TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    enabled         BOOLEAN NOT NULL DEFAULT false,
+    params_json     JSONB NOT NULL,
+    instruments     TEXT[] NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
 
-### 10.1 Pre-trade gates (Stage A)
+Initial row at deployment:
 
-All must pass before placing the order:
-
-1. `system:flags:trading_active == "true"`.
-2. `kill_switch_status[NSE_FO].kill_switch_enabled == false`.
-3. `system:flags:daily_loss_circuit_triggered == "false"`.
-4. `system:flags:engine_up:order_exec == "true"` (self-check).
-5. **Spread filter**: `(best_ask − best_bid) / ltp ≤ spread_skip_pct`.
-6. **Depth check**: `best_ask_qty ≥ intended_lots × lot_size`. If insufficient, reduce lots; if reducing below `min_lots = 1`, abandon.
-7. **Circuit-limit check**: candidate price must lie within the broker-reported lower/upper circuit (sanity check; rare violation).
-
-Any failure: signal is rejected, logged to `orders:stream:rejected_signals` and Postgres `trades_rejected_signals`.
-
-### 10.2 Order pricing
-
-| Side | Limit price |
-|---|---|
-| BUY | `best_ask + buffer_inr` |
-| SELL | `best_bid − buffer_inr` |
-
-Default `buffer_inr = ₹2`. Aggressive enough to fill most of the time, conservative enough to avoid overpaying on the spread.
-
-LTP is **never** used to place orders.
-
-### 10.3 Entry monitor (Stage C)
-
-Entry monitor is **event-driven** on broker portfolio WS, not poll-based. The Portfolio Streamer (`UpstoxAPI.portfolio_streamer(...)`) pushes order-update events as broker state changes. Order Exec consumes them and reacts.
-
-| Broker state | Action |
-|---|---|
-| `FILLED` | Move to Stage D (exit eval) |
-| `PARTIAL` (partial fill, rest pending) | Wait `partial_grace_sec` (default 3s); if rest still pending, cancel remainder, continue with filled qty |
-| `OPEN` AND ask drifted < `drift_threshold` | Hold |
-| `OPEN` AND `drift_threshold` ≤ drift < `chase_ceiling` | Modify limit to new ask + buffer |
-| `OPEN` AND drift ≥ `chase_ceiling` | Cancel, abandon signal |
-| `OPEN` AND no movement for `open_timeout_sec` | Cancel, abandon signal |
-| `REJECTED` | Refresh quote, retry up to `max_retries`, then abandon |
-
-Defaults: `drift_threshold = ₹3`, `chase_ceiling = ₹15`, `open_timeout_sec = 8`, `max_retries = 2`, `partial_grace_sec = 3`.
-
-### 10.4 Exit submit (Stage E) — modify-only
-
-Exit orders **never** abandon. The position MUST close. The loop:
-
-1. Place SELL DAY LIMIT at `best_bid − buffer_inr`.
-2. Wait for fill via portfolio WS.
-3. If `OPEN` and bid has drifted, **modify** the limit toward the new bid — do not cancel.
-4. If `REJECTED`, refresh quote and retry place.
-5. Continue until `FILLED`.
-
-In the last 15 min before EOD (after 15:00), the buffer is widened to `eod_buffer_inr` (default `₹5`) to fill faster against thin EOD books.
-
-### 10.5 Cleanup atomicity
-
-Stage F runs a single Lua script `cleanup_position.lua` that atomically:
-- Deletes `orders:positions:{pos_id}`, `orders:orders:{order_id}` for both legs, `orders:status:{pos_id}`, `orders:signals:{sig_id}`.
-- Removes `pos_id` from `orders:positions:open` and `orders:positions:open_by_index:{index}`.
-- Adds `pos_id` to `orders:positions:closed_today`.
-- Updates `orders:allocator:open_count[index]` and `orders:allocator:open_symbols`.
-
-Postgres `INSERT trades_closed_positions` runs BEFORE the Lua cleanup. If the INSERT fails, the report is buffered in `orders:reports:pending` and retried by Background; cleanup waits for the buffer to clear (or proceeds with WARN after 30s).
-
----
-
-## 11. Risk Management Summary
-
-| Layer | Rule | Default |
-|---|---|---|
-| **Per-trade SL** | hard exit at premium drop | −20% |
-| **Per-trade target** | hard exit at premium rise | +50% |
-| **Trailing SL** | armed and trails | armed at +15%, trails 5% off peak |
-| **Time-in-trade** | force exit after duration | 25 min |
-| **Liquidity exit** | spread filter | > 5% of LTP (suppressed last 15min) |
-| **Daily loss circuit** | flatten + halt across both indexes | −8% of capital |
-| **EOD square-off** | force exit | 15:15 IST |
-| **Concurrent positions per index** | max | 1 |
-| **Concurrent positions total** | max | 2 (one per index) |
-| **Reversal threshold** | per index INR | NIFTY ₹20 / BANKNIFTY ₹40 |
-| **Both-negative wait** | both SUMs < 0 → no entry until one crosses +threshold | yes |
-| **Entry dominance threshold** | both SUMs > 0 → require gap | same as reversal_threshold |
-| **Post-SL cooldown** | block re-entry | 60s |
-| **Post-reversal cooldown** | block flips + entries | 90s |
-| **Daily entry cap (per index)** | max entries | 8 |
-| **Daily reversal cap (per index)** | max flips | 4 |
-| **Entry freeze pre-EOD** | no new entries | 15:10 → 15:15 |
-
----
-
-## 12. ΔPCR Overlay (Informational)
-
-The ΔPCR (change in put-call OI ratio) overlay is **kept for the dashboard but disabled on the hot path by default**. Its data refresh cadence (NSE OI updates every 3 min) is too slow for entry/exit decisions.
-
-### 12.1 Computation (per index, every 3 min from 09:18)
-
-1. **Re-center the strike set**: `ATM = round(spot / strike_step) × strike_step`. Strike set = `{ATM−2, ATM−1, ATM, ATM+1, ATM+2} × step`.
-2. **Compute ΔOI per strike**:
-   - If strike was in previous set: `ΔOI = current_OI − previous_OI`.
-   - If strike is new (just moved into set): `ΔOI = current_OI`.
-   - If strike has exited the set: ignore for this interval.
-3. **Aggregate**:
-   ```
-   Total_ΔPut_OI       = Σ ΔPut_OI over the 5 current strikes
-   Total_ΔCall_OI      = Σ ΔCall_OI over the 5 current strikes
-   Interval_ΔPCR       = Total_ΔPut_OI / Total_ΔCall_OI
-   Cumulative_ΔPCR     = Σ Interval_ΔPut_OI / Σ Interval_ΔCall_OI  (since session start)
-   ```
-
-### 12.2 Reading
-
-| Cumulative_ΔPCR | Reading |
-|---|---|
-| > 1.2 | Strong fresh put writing → bullish bias |
-| 0.8 – 1.2 | Neutral |
-| < 0.8 | Strong fresh call writing → bearish bias |
-
-### 12.3 Operating modes (per index)
-
-| Mode | Behavior | Default |
-|---|---|---|
-| **1 — Display Only** | Dashboard only; no effect on signals | ✅ |
-| **2 — Soft Veto** | Entry contradicting ΔPCR direction → 50% reduced position size | off |
-| **3 — Hard Veto** | Entry contradicting ΔPCR direction → skip the trade | off |
-
-Modes 2 and 3 are wired but disabled by default. Enabling either places ΔPCR on the hot path; given the 3-min cadence vs sub-second tick path, the gating is *already stale* by the time it acts. The user should turn these on only after observing live behavior and deciding the slow signal helps.
-
----
-
-## 13. Daily Lifecycle (cross-reference)
-
-The strategy engine boots, runs, and shuts down according to `Sequential_Flow.md`. Here is the strategy-specific timeline:
-
-| Time | Event |
-|---|---|
-| 09:14:00 | Data Pipeline subscribes broker WS to ATM±6 across both indexes (54 keys). |
-| 09:14:50 | Strategy/idx captures pre-open snapshot. Validates: any zero-ts strike → opt-out for the day. |
-| 09:14:50 | Background captures ΔPCR baseline OI per index. |
-| 09:15:00 | Market open. ATM at 09:15 LOCKED. Trading basket built and persisted. |
-| 09:15:10 | Phase 2 continuous decision loop begins (per index). |
-| 09:18:00, 09:21:00, … | Background ΔPCR thread computes every 3 min until 15:12. |
-| 15:10:00 | **Entry freeze** begins. No new entries; existing trades managed normally. |
-| 15:15:00 | EOD square-off event fires. Order Exec force-exits all open positions. |
-| 15:30:00 | Market close. Strategy thread transitions to WAITING_NEXT_DAY. |
-| 15:45:00 | Graceful shutdown: strategy thread drains tick stream and exits. |
-
----
-
-## 14. Configuration Surface
-
-```yaml
-indexes:
-  nifty50:
-    enabled:                       true
-    exchange:                      NSE
-    strike_step:                   50
-    lot_size:                      75              # refreshed daily from instruments
-    expiry_preference:             "nearest"       # nearest expiry >= today
-    subscription_range:            6               # ATM ± N strikes
-    trading_basket_range:          2               # ATM ± N trading strikes
-    delta_pcr_range:               2               # ATM ± N for ΔPCR
-    reversal_threshold_inr:        20
-    entry_dominance_threshold_inr: 20              # default to reversal_threshold_inr
-    target_pct:                    0.50
-    sl_pct:                        0.20
-    tsl_arm_pct:                   0.15
-    tsl_trail_pct:                 0.05
-    max_hold_minutes:              25
-    fixed_lots:                    1
-    delta_pcr_mode:                1               # 1=display, 2=soft veto, 3=hard veto
-    post_sl_cooldown_sec:          60
-    post_reversal_cooldown_sec:    90
-    max_entries_per_day:           8
-    max_reversals_per_day:         4
-
-  banknifty:
-    enabled:                       true
-    exchange:                      NSE
-    strike_step:                   100
-    lot_size:                      35
-    expiry_preference:             "nearest"
-    subscription_range:            6
-    trading_basket_range:          2
-    delta_pcr_range:               2
-    reversal_threshold_inr:        40
-    entry_dominance_threshold_inr: 40
-    target_pct:                    0.50
-    sl_pct:                        0.20
-    tsl_arm_pct:                   0.15
-    tsl_trail_pct:                 0.05
-    max_hold_minutes:              25
-    fixed_lots:                    1
-    delta_pcr_mode:                1
-    post_sl_cooldown_sec:          60
-    post_reversal_cooldown_sec:    90
-    max_entries_per_day:           8
-    max_reversals_per_day:         4
-
-execution:
-  buffer_inr:                      2               # ₹2 for entry/exit limit pricing
-  eod_buffer_inr:                  5               # widened buffer after 15:00
-  spread_skip_pct:                 0.05            # 5% LTP-relative spread filter
-  drift_threshold_inr:             3               # entry: modify if ask drifts ≥ this
-  chase_ceiling_inr:               15              # entry: abandon if ask drifts ≥ this
-  open_timeout_sec:                8               # entry: abandon if no fill within
-  partial_grace_sec:               3               # cancel partial-fill remainder after
-  max_retries:                     2               # rejected order retry count
-  liquidity_exit_suppress_after:   "15:00"         # disable liquidity exit after this
-
-global_risk:
-  daily_loss_circuit_pct:          0.08
-  max_concurrent_positions:        2
-  trading_capital_inr:             200000
-
-session:
-  market_open:                     "09:15"
-  pre_open_snapshot:               "09:14:50"
-  ws_subscribe_at:                 "09:14:00"
-  delta_pcr_first_compute:         "09:18"
-  delta_pcr_interval_minutes:      3
-  entry_freeze:                    "15:10"
-  eod_squareoff:                   "15:15"
-  market_close:                    "15:30"
-
-# Default mode at deployment is paper. Live requires explicit operator opt-in.
-mode:                              "paper"         # or "live"
+```sql
+INSERT INTO strategy_definitions (strategy_id, name, version, enabled, params_json, instruments)
+VALUES ('bid_ask_imbalance_v1', 'Bid/Ask Imbalance Order-Flow', '1.0.0', true,
+        '{...defaults from §10...}', ARRAY['nifty50','banknifty']);
 ```
 
----
+### 9.3 Migration plan
 
-## 15. Test Scenarios (property-based)
+One-shot Alembic migration (rev `0010_strategy_namespace_refactor`):
 
-These are the invariants every code change must preserve. CI runs them.
+1. Add `strategy_id` column with default `'bid_ask_imbalance_v1'` to the four tables above.
+2. Drop default after backfill (so new rows must specify it).
+3. Drop `metrics_delta_pcr_history`.
+4. Create `strategy_definitions` + insert default row.
 
-| # | Property | Test |
-|---|---|---|
-| 1 | Pre-open snapshot is immutable | After 09:14:50, attempting to write `strategy:{idx}:pre_open` raises |
-| 2 | Basket is locked at 09:15 | Spot drift after 09:15 does NOT change `strategy:{idx}:basket` |
-| 3 | Per-index opt-out works | Force one strike's pre-open ts=0 → that index goes `enabled=false`, OTHER index continues |
-| 4 | No entry during cooldown | State=COOLDOWN, fire any tick → no signal emitted |
-| 5 | No entry during entry freeze | Time ≥ 15:10, fire any tick → no entry; only exits/flips emit |
-| 6 | Daily entry cap enforced | After 8 entries on an index, 9th valid signal is suppressed |
-| 7 | Daily reversal cap enforced | After 4 flips, 5th flip condition ignored |
-| 8 | Exit priority cascade | Multiple triggers same tick → highest-priority wins |
-| 9 | Exits never abandon | Force REJECTED on exit → keeps modify-looping until filled |
-| 10 | Reversal flip atomicity | Exit fails to fill → entry NOT submitted; state stays IN_* |
-| 11 | Idempotent signals | Re-emit same sig_id → Order Exec dedupes; no double-fill |
-| 12 | Daily loss circuit halts both indexes | Trigger circuit → all open positions force-exit; no new signals on either index |
-| 13 | OI never on hot path | Grep test: `oi` never appears in strategy decision-tree functions |
-| 14 | Engine restart resumes correctly | Kill strategy mid-trade → restart → resumes IN_* state with same position |
-| 15 | Pre-open zero-quote is fail-closed | Mock 1 strike with ts=0 → that index's `enabled=false` for the day |
+Init engine drops the deprecated Redis keys at boot via a small `cleanup_legacy_strategy_keys()` step. No runtime coexistence — clean cut.
 
----
+### 9.4 Signal payload v2
 
-## 16. Open Decisions
+```json
+{
+  "sig_id": "ulid",
+  "strategy_id": "bid_ask_imbalance_v1",
+  "instrument_id": "nifty50",
+  "intent": "ENTER" | "EXIT" | "FLIP",
+  "side": "CE" | "PE",
+  "strike": 24350,
+  "instrument_token": "NSE_FO|41784",
+  "qty_lots": 1,
+  "score": 8.0,
+  "score_breakdown": {"spread": 2, "imbalance": 2, "ask_wall": 2, "tick_speed": 0, "ltp_position": 2},
+  "net_pressure_at_signal": 0.74,
+  "decision_ts": 1778131002653,
+  "basket_snapshot": [...]  // forensic only
+}
+```
 
-| # | Decision | Default | Alternative |
-|---|---|---|---|
-| 1 | Drop Phase 1 first-tick entry | YES (drop) | Keep as optional config flag |
-| 2 | Entry-dominance gating when both SUMs > 0 | Use `reversal_threshold_inr` as the gap | Separate parameter (already wired as `entry_dominance_threshold_inr`) |
-| 3 | Cooldown durations | 60s post-SL, 90s post-reversal | Configurable; tune from live data |
-| 4 | Daily entry cap | 8 entries / 4 reversals per index | Lower for live mode initial weeks |
-| 5 | Liquidity exit suppression window | After 15:00 | Configurable boundary |
-| 6 | ΔPCR default mode | 1 (display) | Mode 2 or 3 only after live observation |
-| 7 | Partial fill grace period | 3s before canceling remainder | 5s if execution feedback shows partials are normal |
-| 8 | EOD buffer widening | ₹5 after 15:00 | ₹3 / ₹10 — tune from EOD slippage data |
-
-Until signed off, the defaults apply.
+The order-execution engine carries `strategy_id` straight through to `trades_closed_positions.strategy_id` — no extra code path.
 
 ---
 
-## 17. Scope
+## 10. Configuration Surface
 
-**In scope:**
-- NIFTY 50 + BANKNIFTY weekly/monthly options.
-- Premium-diff momentum engine with reversal flips.
-- ΔPCR overlay (informational by default).
-- DAY-limit execution with broker-WS-driven entry monitor and modify-only exit.
-- Per-trade risk caps + global daily-loss circuit.
-- Paper + live modes (default paper).
-- Single concurrent position per index, fixed lot sizing, single user.
-- Cooldowns, daily caps, entry freeze.
+### 10.1 Strategy-level config (`strategy:configs:strategies:bid_ask_imbalance_v1`)
 
-**Out of scope (v1):**
-- SENSEX, single-stock options, multi-strategy concurrency.
-- ML signal weighting, regime detection.
-- Multi-tenant deployment.
-- Hedging legs / spreads / combos.
-- Index-futures hedging.
-- Volume- or delta-weighted strike pick (current is pure highest-Diff).
-- Variable position sizing based on premium / IV.
+```json
+{
+  "strategy_id": "bid_ask_imbalance_v1",
+  "version": "1.0.0",
+  "enabled": true,
+  "thresholds": {
+    "imbalance_strong_buy": 1.30,
+    "imbalance_moderate_buy": 1.10,
+    "imbalance_neutral_low": 0.90,
+    "imbalance_moderate_sell": 0.70,
+    "net_pressure_entry_threshold": 0.50,
+    "net_pressure_neutral_band": 0.20,
+    "imbalance_drop_pct_for_reversal": 30.0,
+    "ask_wall_qty_multiple": 5,
+    "ltp_aggressor_tolerance_inr": 0.10
+  },
+  "tick_speed": {
+    "min_consecutive": 3,
+    "window_ms": 1000
+  },
+  "buffer": {
+    "ring_size": 50
+  },
+  "atm_shift": {
+    "hysteresis_sec": 5
+  },
+  "time_windows": [
+    {"start": "09:15", "end": "09:30", "phase": "OPENING", "min_score": 8},
+    {"start": "09:30", "end": "11:30", "phase": "PRIMARY", "min_score": 6},
+    {"start": "11:30", "end": "13:30", "phase": "MID", "min_score": 7},
+    {"start": "13:30", "end": "15:00", "phase": "CONTINUATION_ONLY", "min_score": 7},
+    {"start": "15:00", "end": "15:30", "phase": "EXIT_ONLY", "min_score": null}
+  ]
+}
+```
+
+### 10.2 Instrument-level overrides (`strategy:configs:strategies:{sid}:instruments:{idx}`)
+
+```json
+{
+  "instrument_id": "nifty50",
+  "strike_step": 50,
+  "lot_size": 75,
+  "qty_lots": 1,
+  "basket_size": 5,
+  "expiry_basket_size": 7,
+  "spread_good_inr": 0.50,
+  "spread_moderate_inr": 1.00,
+  "max_entries_per_day": 8,
+  "max_reversals_per_day": 4,
+  "sl_pct": 0.20,
+  "target_pct": 0.50,
+  "tsl_arm_pct": 0.15,
+  "tsl_trail_pct": 0.05,
+  "max_hold_sec": 1500,
+  "post_sl_cooldown_sec": 60,
+  "post_reversal_cooldown_sec": 90
+}
+```
+
+BANKNIFTY differs only in: `strike_step=100`, `lot_size=35`, `spread_good_inr=1.50`, `spread_moderate_inr=3.00`.
+
+### 10.3 Hot reload
+
+Both configs hot-reload on FastAPI `PUT /configs/strategy/{strategy_id}` and `PUT /configs/strategy/{strategy_id}/instrument/{idx}`. The vessel re-reads its config on the next decision tick. No restart needed.
+
+Config validation runs server-side before write (Pydantic schemas mirroring the JSON above). Invalid configs are rejected with 422; the running config is not overwritten.
 
 ---
 
-## 18. Summary
+## 11. Logging, Observability, Live Display
 
-The strategy trades a fixed locked-at-09:15 basket of six ITM-biased options per index across NIFTY 50 and BANKNIFTY. Direction is decided by which side's summed premium-diff vs the pre-open baseline is positive and dominant; the engine flips when the opposite side decisively overtakes by a per-index INR threshold. Every tick triggers an entry, hold, exit, or flip evaluation through an explicit 5-state machine (FLAT, IN_CE, IN_PE, COOLDOWN, HALTED). Eight exit triggers in strict priority govern position close; exits are modify-only and cannot abandon. Reversal flips are atomic single-signals executed by Order Exec as exit-then-entry with a 90s cooldown after. Cooldowns (60s post-SL, 90s post-flip) and daily caps (8 entries / 4 flips per index) damp overtrading. ΔPCR is computed every 3 min for the dashboard but does not gate decisions by default — NSE OI cadence is too slow for the hot path.
+The original spec mentions "live CMD output". On a headless EC2 server no operator is watching a terminal. The output is therefore split three ways — same data, different sinks.
+
+### 11.1 Per-tick decision telemetry (forensic)
+
+Every vessel evaluation writes one structured log record:
+
+```json
+{
+  "engine": "strategy",
+  "strategy_id": "bid_ask_imbalance_v1",
+  "instrument_id": "banknifty",
+  "ts": "2026-05-07T05:14:12.653Z",
+  "tick_token": "NSE_FO|67568",
+  "phase": "LIVE",
+  "state": "FLAT",
+  "metrics": {
+    "net_pressure": 0.74,
+    "cum_ce_imbalance": 1.42,
+    "cum_pe_imbalance": 0.68,
+    "spread_status": "good",
+    "ask_wall_state": "absorbing",
+    "tick_speed_up": 4
+  },
+  "action": "NO_OP",
+  "reason": "score_below_window_threshold",
+  "score": 6,
+  "min_score_required": 7
+}
+```
+
+Goes to `journalctl -u pcr-strategy` and a structured log file. Used for post-mortem review of any session.
+
+### 11.2 Periodic live display (operator visibility)
+
+Throttled to once every 2 seconds per vessel. Format:
+
+```
+===== LIVE DEPTH ENGINE [bid_ask_imbalance_v1 · banknifty] =====
+Time:           10:42:18 IST
+Phase:          LIVE (PRIMARY)        State: FLAT
+ATM:            56000  (spot 55981)
+Basket:         CE [55800,55900,56000,56100,56200]  PE [55800,55900,56000,56100,56200]
+
+CE SIDE:
+  Cum imbalance:     1.42 (Strong Buyers)
+  Dominant strike:   56000  imb 1.51  spread 0.85 (good)  wall ABSORBING
+  Tick speed:        +4 upticks in 800ms
+  LTP position:      near ASK (aggressive buying)
+
+PE SIDE:
+  Cum imbalance:     0.68 (Moderate Sellers)
+  Dominant strike:   56000  imb 0.71  spread 0.95 (good)  wall NONE
+  Tick speed:        flat
+  LTP position:      mid
+
+NET PRESSURE:        +0.74  [BULLISH]
+QUALITY SCORE:       8/10   (window threshold: 6 → ELIGIBLE)
+LAST DECISION:       NO_OP — ENTER pending allocator OK (15ms ago)
+================================================================
+```
+
+Goes to a separate log stream `pcr-strategy-live` and is also pushed via WebSocket to the frontend dashboard for real-time viewing.
+
+### 11.3 Reversal warning alerts
+
+When a reversal warning fires, an additional structured event:
+
+```
+****** REVERSAL WARNING [bid_ask_imbalance_v1 · banknifty] ******
+Time:           11:08:42 IST     State: IN_CE
+CE Imbalance:   1.64 → 0.94  (DROP -42.7% over 2 ticks)
+Triggers:
+  [x] Ask wall on 56000 CE re-formed (qty 1480, REFRESHING)
+  [x] Bid liquidity halved on 56000 CE
+  [x] Spread widened: 0.85 → 1.95
+  [x] LTP shifted from near-ASK to near-BID
+Action emitted:  FLIP → IN_PE
+*****************************************************************
+```
+
+Pushed to a `WARNING`-level log + a notification frame on the WebSocket so the dashboard surfaces it.
+
+### 11.4 Vessel heartbeat
+
+Each vessel writes its heartbeat to `system:health:heartbeats:strategy:{sid}:{idx}` every 5 seconds during LIVE phase. The health engine flags it red if no update for >30 s during LIVE phase. **This is what makes today's silent-loop bug architecturally impossible** — a vessel that isn't ticking is detected within 30 seconds and surfaced on `/api/health`.
+
+---
+
+## 12. Migration Plan from Premium-Diff
+
+### Phase A — Schema (1 commit)
+
+1. Alembic migration `0010_strategy_namespace_refactor`:
+   - Add `strategy_id` column to four trade/metrics tables
+   - Drop `metrics_delta_pcr_history`
+   - Create `strategy_definitions` + insert `bid_ask_imbalance_v1` row
+2. Update `state/redis_template.py` — remove deprecated keys, add new namespaced keys (Section 9.1)
+3. Init engine cleanup step deletes legacy `strategy:{idx}:*` keys at next boot
+
+### Phase B — Data pipeline depth feed (1 commit)
+
+1. Verify Upstox v2/v3 supports 5-level market depth subscription on F&O (this is **the** open dependency — must confirm before any of Phase C starts)
+2. Update `pcr-data-pipeline` to subscribe in depth mode and write `bid_qty_l1..l5`, `ask_qty_l1..l5` per token to the option_chain payload
+3. Add `PUBLISH tick.{token}` after each Redis write
+4. Update Schema doc accordingly
+
+### Phase C — Strategy engine rewrite (multiple commits, see module map §8)
+
+In rough dependency order:
+
+1. `runner.py` + `registry.py` + vessel lifecycle (no strategy logic yet — empty `decide()` returning NO_OP)
+2. `ingestion.py` pub/sub fan-out
+3. `publisher.py` signal emission
+4. `strategies/base.py` abstract interface
+5. `strategies/bid_ask_imbalance/basket.py` + `snapshot.py` + `buffer.py`
+6. All eight `metrics/*.py` files (parallel, each with unit tests)
+7. `decisions/entry_gates.py`, `continuation.py`, `reversal.py`, `timing.py`
+8. `strategies/bid_ask_imbalance/state.py` — vessel state machine + cooldowns
+9. `strategies/bid_ask_imbalance/strategy.py` — wire everything together
+10. `observability/live_display.py` + `decision_log.py`
+
+### Phase D — Order execution adaptation (1 commit)
+
+1. Signal schema v2 — add `strategy_id`, `score`, `score_breakdown`, `net_pressure_at_signal`
+2. Allocator Lua scripts namespace by `(strategy_id, index)` instead of just `index`
+3. `trades_closed_positions` writes carry `strategy_id`
+4. Worker pool size bumped to 12 (room for future strategies)
+
+### Phase E — FastAPI + frontend (1 commit)
+
+1. `GET /strategy/status` — returns array of vessels with state, metrics, last decision
+2. `GET /strategy/definitions` — list registered strategies
+3. `PUT /configs/strategy/{sid}` and `/configs/strategy/{sid}/instrument/{idx}` — hot-reload configs
+4. WebSocket view payloads add `strategy_id` and the live-display block
+5. Old premium-diff endpoints removed
+
+### Phase F — Cleanup (1 commit)
+
+1. Delete `backend/engines/strategy/strategies/premium_diff/` entirely
+2. Delete `engines/strategy/pre_open_snapshot.py`
+3. Remove `strategy:configs:indexes:*` references
+4. Delete ΔPCR engine code (it was an overlay on the old strategy)
+5. Update `Schema.md`, `HLD.md`, `TDD.md`, `API.md` to match
+6. Bump version: `pyproject.toml`, `git tag v2.0.0-bid-ask-imbalance`
+
+### Phase G — Validation (no code; ops only)
+
+1. Paper-trade for 5 trading days
+2. Verify per-vessel metrics, decisions, signals look sane
+3. Tune thresholds based on observed behavior — **not** based on backtests
+4. Sign off → flip mode to `live`
+
+---
+
+## 13. Open Dependencies
+
+These must be resolved before code is written. Each blocks a specific phase:
+
+1. **Upstox 5-level depth feed availability** — blocks Phase B. Need confirmation from Upstox docs / live test that v2/v3 WS exposes `bid_qty_l1..l5` / `ask_qty_l1..l5` on F&O instruments. If only top-of-book is available, the strategy as designed cannot run; we'd need to either renegotiate the strategy logic to top-of-book only (much weaker edge) or move to a depth-providing broker.
+
+2. **Tick rate at scale** — Upstox should comfortably push the union of basket subscriptions (~30 tokens × 2–3 indexes = 60–90 tokens) at full tick rate without throttling. Worth a load-test in paper mode before Phase C.
+
+3. **Multi-strategy concurrency policy** — when phase E happens and a future second strategy is added: do `(strategy_a, nifty50)` and `(strategy_b, nifty50)` hold simultaneous independent positions, or compete? Recommendation: independent (full attribution, simplest plumbing). Confirm before Phase D allocator Lua changes.
+
+4. **SENSEX support** — currently out of scope; strategy framework supports it via config-only addition once data-pipeline subscribes SENSEX option tokens. If the client wants SENSEX from day one, add to Phase B subscription scope.
+
+5. **Frontend view contract** — the `live_display` block format above needs to be agreed with the frontend before WS payload schema is frozen.
+
+---
+
+## 14. What This Doc Replaces
+
+When this is implemented, the following are removed from the codebase:
+
+- `backend/engines/strategy/strategies/premium_diff/` (entire dir)
+- `backend/engines/strategy/pre_open_snapshot.py`
+- ΔPCR engine and overlay
+- `strategy:{idx}:pre_open`, `live:sum_ce/pe/diffs/delta` Redis keys
+- `metrics_delta_pcr_history` Postgres table
+- All references to "premium-diff" in HLD.md, Modular_Design.md, TDD.md, API.md, Schema.md, Sequential_Flow.md
+
+The new strategy is the only strategy. The framework supports adding more later, but premium-diff is not coming back — it had a smaller edge, a known dead-basket failure mode, and is materially worse on the same hardware.

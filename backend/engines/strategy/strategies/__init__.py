@@ -1,9 +1,10 @@
-"""Per-index strategy classes (one thread per index)."""
+"""Strategy implementations live under this package.
 
-from __future__ import annotations
+Each strategy is a directory with:
+  - strategy.py        — the Strategy subclass exported here
+  - any helper modules (basket, metrics, decisions, etc.)
 
-from engines.strategy.strategies.banknifty import BANKNIFTYStrategy
-from engines.strategy.strategies.base import StrategyInstance
-from engines.strategy.strategies.nifty50 import NIFTY50Strategy
-
-__all__ = ["BANKNIFTYStrategy", "NIFTY50Strategy", "StrategyInstance"]
+Strategies are discovered by `engines.strategy.registry` based on the
+`strategy:registry` SET in Redis populated by Init from the
+`strategy_definitions` Postgres table.
+"""

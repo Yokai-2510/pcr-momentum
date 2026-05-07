@@ -1,4 +1,11 @@
-# Sequential Flow & Lifecycle — Premium-Diff Multi-Index Trading Bot
+# Sequential Flow & Lifecycle — Multi-Strategy Trading Bot
+
+> **Note (2026-05-07):** the daily lifecycle, systemd timer behaviour, and
+> drain ordering described below are still current. The per-tick strategy
+> decision flow has changed — see `Strategy.md` §2 (vessel architecture)
+> and §5 (decision logic). The "premium-diff" decision-tree sections in
+> this doc are deprecated.
+
 
 This document is the **single source of truth** for:
 

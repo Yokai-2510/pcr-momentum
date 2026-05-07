@@ -452,22 +452,48 @@ sections):
 ## Recommended order of operations
 
 ```
-[done]      Phase 0  — Infra (EC2-side)
-            └── AWS SG + Elastic IP pending (user action)
-[done]      Phase 1  — Skeleton + shared primitives
-[done]      Phase 2  — Alembic migrations
-[done]      Phase 3  — Broker SDK
-[done]      Phase 4  — Init engine
-[done]      Phase 5  — Data pipeline
-[done]      Phase 6  — Strategy
-[done]      Phase 7  — Order execution
-[done]      Phase 8  — Background / Scheduler / Health
-[done]      Phase 9  — FastAPI gateway
-[done]      Phase 11  — Hardening: systemd units + Nginx reverse proxy + Lets Encrypt TLS via 3-6-128-21.sslip.io + Postgres nightly backup + journald cap
-[next]      Phase 10a — Frontend (core operator dashboard) — UI polish on Vercel
-            Phase 10b — Frontend Analytics + backend rollup endpoints
-            Phase 12  — Paper-trade → live
+[done]      Phase 0   — Infra (EC2-side)
+[done]      Phase 1   — Skeleton + shared primitives
+[done]      Phase 2   — Alembic migrations
+[done]      Phase 3   — Broker SDK
+[done]      Phase 4   — Init engine
+[done]      Phase 5   — Data pipeline
+[deprecated] Phase 6  — Premium-diff strategy (REPLACED by Phase 6.2 below)
+[done]      Phase 6.2 — Strategy refactor: bid/ask imbalance order-flow strategy
+                        + multi-strategy vessel framework (Strategy.md)
+[done]      Phase 7   — Order execution
+[done]      Phase 8   — Background / Scheduler / Health
+[done]      Phase 9   — FastAPI gateway
+[done]      Phase 11  — Hardening / systemd / TLS / nginx / backups
+[next]      Phase 10a — Frontend (core operator dashboard, Vercel-hosted)
+            Phase 10b — Frontend analytics + backend rollup endpoints
+            Phase 12  — Paper-trade validation (5 days) → live
 ```
+
+## Phase 6.2 — Strategy refactor (2026-05-07)
+
+The premium-diff momentum strategy was replaced entirely by the new
+**Bid/Ask Imbalance Order-Flow** strategy (`Strategy.md`).
+
+**Why:** premium-diff failed in production when chosen basket strikes had
+no live trades — diff stayed at zero, no signals, watched the market
+move with no edge captured. The new strategy reads the order book directly
+(quotes update even when no trades print) and auto-shifts its basket as
+spot moves, killing both failure modes.
+
+**Architectural payoff:** introduced a multi-strategy vessel framework.
+One `pcr-strategy` engine hosts N async vessels, each `(strategy_id,
+instrument_id)`. Adding a new strategy is now a config-only change.
+
+**Status:** code shipped, engine boots cleanly, registry + configs seeded
+in Redis. Live verification deferred to next trading session (08:00 IST
+auto-cycle picks up the new code).
+
+**Deferred sub-tasks** (non-blocking):
+- Allocator Lua scripts namespaced by `(strategy_id, index)`
+- Postgres `strategy_definitions` table + `strategy_id` column on trades
+- FastAPI `/strategy/status` v2 endpoint
+- Removal of back-compat shims in `state/keys.py`
 
 ### Notes
 - Phases 1-2 are tightly coupled; ship them together.
