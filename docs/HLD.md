@@ -134,8 +134,9 @@ Per-vessel loop (event-driven, no artificial floor):
 3. Subscribe to `market_data:pub:tick:{token}` for every basket token
 4. On any wake-up: read option_chain + spot, build typed `Snapshot`, call
    `strategy.on_tick(ctx, snapshot, memory)` → `Action`
-5. Persist last-decision telemetry every tick (kills silent-loop bugs);
-   apply state transitions; emit Signal to `strategy:stream:signals` if actionable
+5. Persist last-decision telemetry every tick (so an alive vessel always has
+   a fresh `last_decision_ts`); apply state transitions; emit Signal to
+   `strategy:stream:signals` if actionable
 6. Re-check basket every 1 s — auto-shifts when spot crosses a strike step
 7. At 15:30 IST: enter DRAIN phase, stop emitting new entries
 

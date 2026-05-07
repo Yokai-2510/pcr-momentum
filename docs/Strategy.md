@@ -1,56 +1,46 @@
 # Strategy Engine — Bid/Ask Imbalance Order-Flow
 
-This document is the **complete and only** specification for the strategy engine going forward.
+This document specifies the strategy engine.
 
-It replaces the previous "Premium-Diff Momentum" strategy entirely. The premium-diff code path, schema keys, configs, and database columns specific to it are deprecated and will be removed during this implementation. No backwards compatibility shims are kept — the bot is pre-revenue, paper-only, and the cleanest possible cut is the right one.
+Sections:
 
-This doc covers:
-
-1. The trading thesis (the edge claim)
+1. Trading thesis
 2. Engine architecture — one process, N strategy vessels, async event-driven
 3. Strike basket construction + dynamic ATM management
 4. The eight atomic metrics that drive every decision
-5. The decision logic — entry gates, continuation, reversal warning
+5. Decision logic — entry gates, continuation, reversal warning
 6. Time-of-day windowing
-7. Module-by-module code layout (every section maps 1:1 to a file)
-8. Data flow + lifecycle
-9. Schema (Redis + Postgres)
-10. Configuration surface
-11. Logging, observability, live display
-12. Migration plan from premium-diff
-13. Open dependencies that must be confirmed before code is written
+7. Module layout
+8. Schema (Redis + Postgres)
+9. Configuration
+10. Logging, observability, live display
 
-The lifecycle / boot / shutdown is covered in `Sequential_Flow.md`. The broker SDK is covered in `backend/brokers/upstox/__init__.py`. Cross-engine plumbing is in `HLD.md`.
+Lifecycle / boot / shutdown: `Sequential_Flow.md`. Broker SDK: `backend/brokers/upstox/__init__.py`. Cross-engine plumbing: `HLD.md`.
 
 ---
 
-## 1. The Edge
+## 1. Trading Thesis
 
-**Read the order book, not the price.**
+The strategy reads the resting order book (bid/ask quantities at five depth levels) on a basket of strikes around ATM. Order book state updates arrive on every quote change, including when no trade prints. The strategy fires when imbalance, spread, ask-wall state, aggressor side, and tick-direction streak all align in the same direction at the same moment.
 
-The premium-diff strategy waited for trades to print, then measured how far the printed premium had moved from a pre-open baseline. That edge has two structural problems on a retail feed:
+**Inputs used on the hot path:**
 
-- It needs liquidity *on the basket strikes specifically*. If pre-open chosen strikes go silent for the day (real failure mode observed in production), the strategy sees zero movement and emits zero signals — even when other strikes are screaming.
-- It is reactive: by the time a trade prints at the new price, the move is partially over.
+- **Per-strike imbalance** — `ΣBidQty / ΣAskQty` across the 5 depth levels.
+- **Spread** — `best_ask − best_bid` for liquidity-quality gating.
+- **Ask wall** — `best_ask_qty > 5 × best_bid_qty` plus its history (HOLDING / ABSORBING / REFRESHING).
+- **Aggressor** — LTP near best ask (buyers lifting offers) or near best bid (sellers hitting bids).
+- **Tick speed** — N consecutive upticks (or downticks) within `window_ms`.
+- **Cumulative imbalance** — `Σ(BidQty)/Σ(AskQty)` aggregated across all CE strikes; symmetric for PE.
+- **Net pressure** — `cum_ce_imbalance − cum_pe_imbalance`. Single composite for direction.
+- **Quality score** — 0–10 across 5 conditions (§4.8); gates entry size + entry permission.
 
-The bid/ask imbalance strategy reads the **resting order book** (bid/ask quantities at multiple depth levels) instead of executed trades. Order book updates arrive even when no trade prints. Pressure builds on the book *before* it shows in price. This is the moat.
+**Inputs not used on the hot path:**
 
-**Edge components:**
+- **Open interest** — NSE refreshes OI ~3 min, too slow for tick-level decisions.
+- **Greeks** — informational only.
+- **Historical candles** — backtesting only.
 
-- **Order book pressure** — `ΣBidQty / ΣAskQty` on a per-strike and cumulative basis tells us whether buyers or sellers are accumulating depth.
-- **Aggressor detection** — LTP near the ask = aggressive buying lifting offers; near the bid = aggressive selling hitting bids.
-- **Ask wall absorption** — large resting ask quantity being eaten by buyers is a high-conviction breakout signal. A wall *not* being absorbed is a high-conviction "do not enter" signal.
-- **Tick-speed confirmation** — three consecutive upticks within one second filter single-tick noise.
-- **Reversal detection** — sudden imbalance collapse + spread widening + ask wall reformation flags exhaustion before price reverses.
-
-We **do not** use:
-
-- Open interest on the hot path (NSE refreshes OI ~3 min — far too slow)
-- Greeks (informational only; not actionable at this latency)
-- Historical candles (backtest only; runtime trades on live order flow)
-- The premium-diff baseline (replaced entirely)
-
-**Honest constraint to bake into expectations**: the alpha is real but smaller than backtests will suggest because Upstox retail depth has 50–200 ms lag versus HFTs. The edge half-life is short. Reaction speed is the entire moat — so the architecture is event-driven, not polled, end to end.
+**Constraint baked into expectations:** Upstox retail depth feed carries 50–200 ms lag. The architecture is event-driven, not polled, end to end, to keep added vessel latency under 1 ms on top of feed latency.
 
 ---
 
@@ -71,7 +61,7 @@ pcr-strategy process (single asyncio event loop, uvloop)
 └── health_heartbeat_task        ← writes heartbeat every 5 s per vessel
 ```
 
-At today's launch the engine runs **two vessels** (one per index, both running the bid/ask imbalance strategy). The architecture is built so adding a third strategy on the same instrument, or the same strategy on SENSEX, is a config change — not a code change.
+The engine runs two vessels by default (one per index, both running the bid/ask imbalance strategy). Adding a third strategy on the same instrument, or the same strategy on SENSEX, is a config change — not a code change.
 
 ### 2.2 Why async, not threads
 
@@ -152,8 +142,6 @@ if new_atm != current_atm:
 ```
 
 The data-pipeline reconciles its WS subscription set whenever `desired` changes. Newly added strikes start streaming within ~1 s. Dropped strikes stop streaming and are released.
-
-This kills the failure mode we hit on 2026-05-07 (basket strikes locked at pre-open, market liquidity moved elsewhere, strategy stranded).
 
 **Strike step + basket size per instrument:**
 
@@ -313,7 +301,7 @@ flowchart TD
     L -->|no| N[emit EXIT signal]
 ```
 
-Every tick produces a logged decision event, even if the action is "no-op". This is what makes silent-loop bugs (the NIFTY failure today) impossible — if the vessel is alive, it is writing decision telemetry every tick.
+Every tick produces a logged decision event, even if the action is `NO_OP`. A vessel that is alive writes decision telemetry every tick; if the `last_decision_ts` for a vessel goes stale during LIVE phase, the health engine flags it red.
 
 ### 5.2 Entry — the 4-gate sequence
 
@@ -515,19 +503,25 @@ This separation means:
 
 ## 9. Schema
 
-### 9.1 Redis namespace changes
+### 9.1 Redis namespace
 
-The `strategy:*` namespace is reorganized to support multiple `(strategy_id, instrument_id)` vessels.
+The `strategy:*` namespace is multi-strategy. Every vessel is a `(strategy_id, instrument_id)` pair with its own state, basket, metrics, and counters.
 
-**New keys:**
+**Registry + definitions:**
 
 | Key | Type | Description |
 |---|---|---|
-| `strategy:registry` | SET | Set of `{strategy_id}:{instrument_id}` pairs currently active |
+| `strategy:registry` | SET | Active vessels — entries are `"{strategy_id}:{instrument_id}"` |
+| `strategy:definitions` | HASH | `{strategy_id: definition_json}` — synced from `strategy_definitions` Postgres table at init |
+
+**Per-vessel state:**
+
+| Key | Type | Description |
+|---|---|---|
 | `strategy:{sid}:{idx}:state` | STRING | One of `FLAT`, `IN_CE`, `IN_PE`, `COOLDOWN`, `HALTED` |
 | `strategy:{sid}:{idx}:phase` | STRING | One of `BOOT`, `PRE_OPEN`, `SETTLE`, `LIVE`, `DRAIN` |
 | `strategy:{sid}:{idx}:phase_entered_ts` | STRING (ms) | When current phase started |
-| `strategy:{sid}:{idx}:basket` | STRING (JSON) | `{"ce":[tok,...], "pe":[tok,...], "atm": int}` |
+| `strategy:{sid}:{idx}:basket` | STRING (JSON) | `{"atm": int, "ce":[tok,...], "pe":[tok,...]}` |
 | `strategy:{sid}:{idx}:enabled` | STRING | `"true"` / `"false"` |
 | `strategy:{sid}:{idx}:current_position_id` | STRING | Empty if FLAT |
 | `strategy:{sid}:{idx}:cooldown_until_ts` | STRING (ms) | 0 if not in cooldown |
@@ -535,46 +529,40 @@ The `strategy:*` namespace is reorganized to support multiple `(strategy_id, ins
 | `strategy:{sid}:{idx}:counters:entries_today` | STRING (int) | Reset at init |
 | `strategy:{sid}:{idx}:counters:reversals_today` | STRING (int) | Reset at init |
 | `strategy:{sid}:{idx}:counters:wins_today` | STRING (int) | Reset at init |
-| `strategy:{sid}:{idx}:metrics:net_pressure` | STRING (float) | Latest computed |
+
+**Per-vessel live metrics (written every tick):**
+
+| Key | Type | Description |
+|---|---|---|
+| `strategy:{sid}:{idx}:metrics:net_pressure` | STRING (float) | Latest |
 | `strategy:{sid}:{idx}:metrics:cum_ce_imbalance` | STRING (float) | Latest |
 | `strategy:{sid}:{idx}:metrics:cum_pe_imbalance` | STRING (float) | Latest |
-| `strategy:{sid}:{idx}:metrics:per_strike` | STRING (JSON) | Map of `{token: {imbalance, spread, ltp, wall_state, aggressor, ...}}` |
-| `strategy:{sid}:{idx}:metrics:last_decision` | STRING (JSON) | `{action, score, reason, ts_ms}` for last decision (write every tick) |
+| `strategy:{sid}:{idx}:metrics:per_strike` | STRING (JSON) | `{token: {imbalance, spread, ltp, wall_state, aggressor, ...}}` |
+| `strategy:{sid}:{idx}:metrics:last_decision` | STRING (JSON) | `{action, score, reason, ts_ms}` for last decision |
 | `strategy:{sid}:{idx}:metrics:last_decision_ts` | STRING (ms) | For staleness alerting |
-| `strategy:configs:strategies:{sid}` | STRING (JSON) | Strategy-level params (thresholds, basket size) |
-| `strategy:configs:strategies:{sid}:instruments:{idx}` | STRING (JSON) | Instrument-overrides (sl_pct, qty, etc.) |
 
-**Deprecated keys (delete during migration):**
+**Configs:**
 
-- `strategy:{idx}:basket` — replaced by namespaced version above
-- `strategy:{idx}:state` — replaced
-- `strategy:{idx}:pre_open` — premium-diff snapshot, no longer used
-- `strategy:{idx}:live:sum_ce` `live:sum_pe` `live:diffs` `live:delta` — premium-diff metrics
-- `strategy:{idx}:delta_pcr:*` — ΔPCR overlay (unused; can be removed cleanly)
-- `strategy:{idx}:counters:*` — re-keyed under namespaced version
-- `strategy:configs:indexes:*` — replaced by per-strategy version
-- `strategy:configs:execution` — kept (order-execution config, not strategy-specific)
-- `strategy:configs:risk` — kept
-- `strategy:configs:session` — kept
+| Key | Type | Description |
+|---|---|---|
+| `strategy:configs:strategies:{sid}` | STRING (JSON) | Strategy-level params (thresholds, time windows, buffer size, hysteresis) |
+| `strategy:configs:strategies:{sid}:instruments:{idx}` | STRING (JSON) | Instrument-level overrides (sl_pct, qty, basket_size, spread thresholds) |
+| `strategy:configs:execution` | STRING (JSON) | Order-execution layer config (worker pool, spread skip, retries) |
+| `strategy:configs:session` | STRING (JSON) | Session-level (market open, EOD square-off, graceful shutdown) |
+| `strategy:configs:risk` | STRING (JSON) | `{daily_loss_circuit_pct, max_concurrent_positions, trading_capital_inr}` |
 
-**Stream:**
+**Stream:** `strategy:stream:signals` — Strategy → Order Exec, consumer group `exec`.
 
-- `strategy:stream:signals` — kept; payload schema changes (Section 9.4)
+### 9.2 Postgres schema
 
-### 9.2 Postgres schema changes
-
-Add `strategy_id TEXT NOT NULL` to:
+`strategy_id TEXT NOT NULL` is present on:
 
 - `trades_closed_positions`
 - `trades_rejected_signals`
 - `metrics_pnl_history`
 - `metrics_order_events`
 
-Drop:
-
-- `metrics_delta_pcr_history` (entire table — premium-diff overlay)
-
-New table `strategy_definitions`:
+Table `strategy_definitions`:
 
 ```sql
 CREATE TABLE strategy_definitions (
@@ -597,22 +585,11 @@ VALUES ('bid_ask_imbalance_v1', 'Bid/Ask Imbalance Order-Flow', '1.0.0', true,
         '{...defaults from §10...}', ARRAY['nifty50','banknifty']);
 ```
 
-### 9.3 Migration plan
-
-One-shot Alembic migration (rev `0010_strategy_namespace_refactor`):
-
-1. Add `strategy_id` column with default `'bid_ask_imbalance_v1'` to the four tables above.
-2. Drop default after backfill (so new rows must specify it).
-3. Drop `metrics_delta_pcr_history`.
-4. Create `strategy_definitions` + insert default row.
-
-Init engine drops the deprecated Redis keys at boot via a small `cleanup_legacy_strategy_keys()` step. No runtime coexistence — clean cut.
-
-### 9.4 Signal payload v2
+### 9.3 Signal payload
 
 ```json
 {
-  "sig_id": "ulid",
+  "sig_id": "sha256(strategy_id|instrument_id|kind|side|strike|ts_ms)[:16]",
   "strategy_id": "bid_ask_imbalance_v1",
   "instrument_id": "nifty50",
   "intent": "ENTER" | "EXIT" | "FLIP",
@@ -623,12 +600,11 @@ Init engine drops the deprecated Redis keys at boot via a small `cleanup_legacy_
   "score": 8.0,
   "score_breakdown": {"spread": 2, "imbalance": 2, "ask_wall": 2, "tick_speed": 0, "ltp_position": 2},
   "net_pressure_at_signal": 0.74,
-  "decision_ts": 1778131002653,
-  "basket_snapshot": [...]  // forensic only
+  "decision_ts": 1778131002653
 }
 ```
 
-The order-execution engine carries `strategy_id` straight through to `trades_closed_positions.strategy_id` — no extra code path.
+The order-execution engine carries `strategy_id` straight through to `trades_closed_positions.strategy_id`. Per-strategy attribution is a `GROUP BY strategy_id` query.
 
 ---
 
@@ -769,7 +745,7 @@ LAST DECISION:       NO_OP — ENTER pending allocator OK (15ms ago)
 ================================================================
 ```
 
-Goes to a separate log stream `pcr-strategy-live` and is also pushed via WebSocket to the frontend dashboard for real-time viewing.
+Pushed via WebSocket to the frontend dashboard and also logged to the `pcr-strategy-live` stream.
 
 ### 11.3 Reversal warning alerts
 
@@ -792,101 +768,5 @@ Pushed to a `WARNING`-level log + a notification frame on the WebSocket so the d
 
 ### 11.4 Vessel heartbeat
 
-Each vessel writes its heartbeat to `system:health:heartbeats:strategy:{sid}:{idx}` every 5 seconds during LIVE phase. The health engine flags it red if no update for >30 s during LIVE phase. **This is what makes today's silent-loop bug architecturally impossible** — a vessel that isn't ticking is detected within 30 seconds and surfaced on `/api/health`.
+Each vessel writes its heartbeat to `system:health:heartbeats:strategy:{sid}:{idx}` every 5 seconds during LIVE phase. The health engine flags it red if no update for >30 s during LIVE phase. A vessel that is alive but not emitting decisions is detected within 30 seconds and surfaced on `/api/health`.
 
----
-
-## 12. Migration Plan from Premium-Diff
-
-### Phase A — Schema (1 commit)
-
-1. Alembic migration `0010_strategy_namespace_refactor`:
-   - Add `strategy_id` column to four trade/metrics tables
-   - Drop `metrics_delta_pcr_history`
-   - Create `strategy_definitions` + insert `bid_ask_imbalance_v1` row
-2. Update `state/redis_template.py` — remove deprecated keys, add new namespaced keys (Section 9.1)
-3. Init engine cleanup step deletes legacy `strategy:{idx}:*` keys at next boot
-
-### Phase B — Data pipeline depth feed (1 commit)
-
-1. Verify Upstox v2/v3 supports 5-level market depth subscription on F&O (this is **the** open dependency — must confirm before any of Phase C starts)
-2. Update `pcr-data-pipeline` to subscribe in depth mode and write `bid_qty_l1..l5`, `ask_qty_l1..l5` per token to the option_chain payload
-3. Add `PUBLISH tick.{token}` after each Redis write
-4. Update Schema doc accordingly
-
-### Phase C — Strategy engine rewrite (multiple commits, see module map §8)
-
-In rough dependency order:
-
-1. `runner.py` + `registry.py` + vessel lifecycle (no strategy logic yet — empty `decide()` returning NO_OP)
-2. `ingestion.py` pub/sub fan-out
-3. `publisher.py` signal emission
-4. `strategies/base.py` abstract interface
-5. `strategies/bid_ask_imbalance/basket.py` + `snapshot.py` + `buffer.py`
-6. All eight `metrics/*.py` files (parallel, each with unit tests)
-7. `decisions/entry_gates.py`, `continuation.py`, `reversal.py`, `timing.py`
-8. `strategies/bid_ask_imbalance/state.py` — vessel state machine + cooldowns
-9. `strategies/bid_ask_imbalance/strategy.py` — wire everything together
-10. `observability/live_display.py` + `decision_log.py`
-
-### Phase D — Order execution adaptation (1 commit)
-
-1. Signal schema v2 — add `strategy_id`, `score`, `score_breakdown`, `net_pressure_at_signal`
-2. Allocator Lua scripts namespace by `(strategy_id, index)` instead of just `index`
-3. `trades_closed_positions` writes carry `strategy_id`
-4. Worker pool size bumped to 12 (room for future strategies)
-
-### Phase E — FastAPI + frontend (1 commit)
-
-1. `GET /strategy/status` — returns array of vessels with state, metrics, last decision
-2. `GET /strategy/definitions` — list registered strategies
-3. `PUT /configs/strategy/{sid}` and `/configs/strategy/{sid}/instrument/{idx}` — hot-reload configs
-4. WebSocket view payloads add `strategy_id` and the live-display block
-5. Old premium-diff endpoints removed
-
-### Phase F — Cleanup (1 commit)
-
-1. Delete `backend/engines/strategy/strategies/premium_diff/` entirely
-2. Delete `engines/strategy/pre_open_snapshot.py`
-3. Remove `strategy:configs:indexes:*` references
-4. Delete ΔPCR engine code (it was an overlay on the old strategy)
-5. Update `Schema.md`, `HLD.md`, `TDD.md`, `API.md` to match
-6. Bump version: `pyproject.toml`, `git tag v2.0.0-bid-ask-imbalance`
-
-### Phase G — Validation (no code; ops only)
-
-1. Paper-trade for 5 trading days
-2. Verify per-vessel metrics, decisions, signals look sane
-3. Tune thresholds based on observed behavior — **not** based on backtests
-4. Sign off → flip mode to `live`
-
----
-
-## 13. Open Dependencies
-
-These must be resolved before code is written. Each blocks a specific phase:
-
-1. **Upstox 5-level depth feed availability** — blocks Phase B. Need confirmation from Upstox docs / live test that v2/v3 WS exposes `bid_qty_l1..l5` / `ask_qty_l1..l5` on F&O instruments. If only top-of-book is available, the strategy as designed cannot run; we'd need to either renegotiate the strategy logic to top-of-book only (much weaker edge) or move to a depth-providing broker.
-
-2. **Tick rate at scale** — Upstox should comfortably push the union of basket subscriptions (~30 tokens × 2–3 indexes = 60–90 tokens) at full tick rate without throttling. Worth a load-test in paper mode before Phase C.
-
-3. **Multi-strategy concurrency policy** — when phase E happens and a future second strategy is added: do `(strategy_a, nifty50)` and `(strategy_b, nifty50)` hold simultaneous independent positions, or compete? Recommendation: independent (full attribution, simplest plumbing). Confirm before Phase D allocator Lua changes.
-
-4. **SENSEX support** — currently out of scope; strategy framework supports it via config-only addition once data-pipeline subscribes SENSEX option tokens. If the client wants SENSEX from day one, add to Phase B subscription scope.
-
-5. **Frontend view contract** — the `live_display` block format above needs to be agreed with the frontend before WS payload schema is frozen.
-
----
-
-## 14. What This Doc Replaces
-
-When this is implemented, the following are removed from the codebase:
-
-- `backend/engines/strategy/strategies/premium_diff/` (entire dir)
-- `backend/engines/strategy/pre_open_snapshot.py`
-- ΔPCR engine and overlay
-- `strategy:{idx}:pre_open`, `live:sum_ce/pe/diffs/delta` Redis keys
-- `metrics_delta_pcr_history` Postgres table
-- All references to "premium-diff" in HLD.md, Modular_Design.md, TDD.md, API.md, Schema.md, Sequential_Flow.md
-
-The new strategy is the only strategy. The framework supports adding more later, but premium-diff is not coming back — it had a smaller edge, a known dead-basket failure mode, and is materially worse on the same hardware.

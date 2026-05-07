@@ -222,26 +222,26 @@ the only public entry point.
 
 ## Phase 6 — Strategy Engine
 
-**Goal:** the 5-state machine and premium-diff momentum logic.
+**Goal:** multi-strategy vessel framework + bid/ask imbalance order-flow strategy.
 
 ### Scope (per `Strategy.md`)
-- One thread per index — single-writer to `strategy:{index}:state` and
-  `positions:{index}:open`.
-- `decision.py` — pure functions matching `Modular_Design.md` signatures.
-- States: `IDLE`, `ARMED`, `IN_POSITION`, `COOLDOWN`, `HALTED`.
-- Entry triggers: premium-diff threshold + ΔPCR confirmation overlay.
-- Exit rules: stop-loss, take-profit, trailing, EOD square-off, manual.
-- Cooldowns: per-trigger and post-flip.
-- Daily caps: max trades/day, max loss/day → transition to `HALTED`.
-- Both-negative recovery: defined in `Strategy.md`.
-- Reversal flips: when allowed, exit + cooldown + flip.
+- One `pcr-strategy` engine process; N async vessels, one per
+  `(strategy_id, instrument_id)` pair, single-writer to
+  `strategy:{sid}:{idx}:*`.
+- Strategy Protocol (`base.py`): `prepare`, `on_pre_open`, `on_tick`, `on_drain`.
+- Tick-driven event loop via Redis pub/sub on `market_data:pub:tick:{token}`.
+- 8 atomic metrics (imbalance, spread, ask wall, aggressor, tick speed,
+  cumulative, net pressure, quality score).
+- 4-gate entry sequence + continuation + reversal warning + time-of-day windowing.
+- Dynamic ATM basket — auto-shifts when spot crosses a strike step.
+- Per-vessel state machine: `FLAT`, `IN_CE`, `IN_PE`, `COOLDOWN`, `HALTED`.
 
 ### Exit criteria
-- Replay test: run `Strategy.md` worked example tick-by-tick; output matches
-  expected entry/exit timing within ±1 tick.
-- Cooldown + cap tests with synthetic event streams.
-- No stale state: a kill+restart of the engine resumes from Redis without
-  duplicating positions.
+- Engine boots cleanly, discovers all vessels from `strategy:registry`,
+  builds initial baskets, reaches LIVE phase.
+- Every tick produces a `last_decision` telemetry write.
+- Per-vessel heartbeat under `system:health:heartbeats` updated every 5 s.
+- No stale state: a kill+restart resumes from Redis without duplicating positions.
 
 ---
 
@@ -458,9 +458,7 @@ sections):
 [done]      Phase 3   — Broker SDK
 [done]      Phase 4   — Init engine
 [done]      Phase 5   — Data pipeline
-[deprecated] Phase 6  — Premium-diff strategy (REPLACED by Phase 6.2 below)
-[done]      Phase 6.2 — Strategy refactor: bid/ask imbalance order-flow strategy
-                        + multi-strategy vessel framework (Strategy.md)
+[done]      Phase 6   — Strategy engine (bid/ask imbalance order-flow; see Strategy.md)
 [done]      Phase 7   — Order execution
 [done]      Phase 8   — Background / Scheduler / Health
 [done]      Phase 9   — FastAPI gateway
@@ -469,31 +467,6 @@ sections):
             Phase 10b — Frontend analytics + backend rollup endpoints
             Phase 12  — Paper-trade validation (5 days) → live
 ```
-
-## Phase 6.2 — Strategy refactor (2026-05-07)
-
-The premium-diff momentum strategy was replaced entirely by the new
-**Bid/Ask Imbalance Order-Flow** strategy (`Strategy.md`).
-
-**Why:** premium-diff failed in production when chosen basket strikes had
-no live trades — diff stayed at zero, no signals, watched the market
-move with no edge captured. The new strategy reads the order book directly
-(quotes update even when no trades print) and auto-shifts its basket as
-spot moves, killing both failure modes.
-
-**Architectural payoff:** introduced a multi-strategy vessel framework.
-One `pcr-strategy` engine hosts N async vessels, each `(strategy_id,
-instrument_id)`. Adding a new strategy is now a config-only change.
-
-**Status:** code shipped, engine boots cleanly, registry + configs seeded
-in Redis. Live verification deferred to next trading session (08:00 IST
-auto-cycle picks up the new code).
-
-**Deferred sub-tasks** (non-blocking):
-- Allocator Lua scripts namespaced by `(strategy_id, index)`
-- Postgres `strategy_definitions` table + `strategy_id` column on trades
-- FastAPI `/strategy/status` v2 endpoint
-- Removal of back-compat shims in `state/keys.py`
 
 ### Notes
 - Phases 1-2 are tightly coupled; ship them together.

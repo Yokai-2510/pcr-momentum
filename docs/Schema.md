@@ -184,10 +184,9 @@ so subscribed strategy vessels wake up (Strategy.md §2.3).
 
 ### 1.4 `strategy:*` — Registry, Configs, Per-Vessel State, Signals
 
-The strategy namespace is fully **multi-strategy** (Strategy.md §2). Every
-vessel (`(strategy_id, instrument_id)` pair) has its own state, basket,
-metrics, and counters. Adding a new strategy is a config change; it never
-collides with existing vessels.
+The strategy namespace is multi-strategy (Strategy.md §2). Every vessel
+(`(strategy_id, instrument_id)` pair) has its own state, basket, metrics,
+and counters. Adding a strategy is a config change.
 
 #### Registry + Definitions
 | Key | Type | Description |

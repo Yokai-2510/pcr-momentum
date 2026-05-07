@@ -1,13 +1,10 @@
-# Modular Design — Multi-Strategy Trading Bot
+# Modular Design
 
-This document is the per-module breakdown intended for implementation. For each module, it specifies its sole responsibility, public interface (function signatures), dependencies, and testing surface.
+This document is the per-module breakdown for implementation. For each module, it specifies its sole responsibility, public interface (function signatures), dependencies, and testing surface.
 
-A reader should be able to implement any single module by reading only its section here, the cross-referenced schema in `Schema.md`.
+A reader should be able to implement any single module by reading only its section here and the cross-referenced schema in `Schema.md`.
 
-> **Note (2026-05-07):** the strategy-engine section here describes the
-> deprecated premium-diff design. The current strategy is the bid/ask
-> imbalance order-flow engine — see `Strategy.md` §8 for the authoritative
-> module map. This doc still applies to all non-strategy engines.
+The strategy-engine module map lives in `Strategy.md` §7. This doc covers the rest of the engines.
 
 ---
 

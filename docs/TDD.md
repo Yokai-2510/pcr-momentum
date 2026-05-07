@@ -1,12 +1,8 @@
-# Technical Design Document — Multi-Strategy Trading Bot
+# Technical Design Document
 
-This document specifies the modular design and per-engine implementation contracts. An engineer reading this should be able to implement each engine independently with no further architectural decisions.
+This document specifies the per-engine implementation contracts for every engine other than the strategy engine. An engineer reading this should be able to implement each engine independently with no further architectural decisions.
 
-> **Note (2026-05-07):** the strategy-engine contract in this doc reflects
-> the deprecated premium-diff design. The current strategy engine is
-> documented authoritatively in `Strategy.md`. The other engine contracts
-> (data pipeline, order exec, background, scheduler, health, init, FastAPI)
-> are still current.
+The strategy engine contract lives in `Strategy.md`.
 
 ---
 
