@@ -362,23 +362,40 @@ async def vessel_loop(
             await asyncio.sleep(2.0)
             continue
 
-        # Memory ↔ Redis state sync. Redis is the source of truth (init or
-        # order-exec rejection can reset it externally). If they disagree,
-        # trust Redis and clear in-memory held_* fields to prevent the
-        # strategy from running continuation/reversal logic against a
-        # phantom position.
+        # Memory ↔ Redis state sync. Redis is the source of truth (order-exec
+        # writes state on confirmed fill; init resets it on boot). On any
+        # mismatch, trust Redis: clear or reload memory.held_* from the
+        # position record so the strategy takes the correct branch
+        # (entry-gates when FLAT, continuation when IN_CE/IN_PE).
         if state in ("FLAT", "COOLDOWN") and (memory.held_side or memory.held_token):
             log.warning(
-                f"vessel state desync: redis={state} memory.held_side={memory.held_side} "
-                f"held_token={memory.held_token}; clearing memory"
+                f"vessel state desync: redis={state} memory.held_side={memory.held_side}; "
+                "clearing memory"
             )
             memory.held_side = None
             memory.held_token = None
             memory.held_strike = None
-        elif state == "IN_CE" and memory.held_side != "CE":
-            memory.held_side = "CE"
-        elif state == "IN_PE" and memory.held_side != "PE":
-            memory.held_side = "PE"
+        elif state in ("IN_CE", "IN_PE"):
+            target_side = "CE" if state == "IN_CE" else "PE"
+            if memory.held_side != target_side or not memory.held_token:
+                pos_id = redis_sync.get(K.strategy_current_position_id(idx))
+                if isinstance(pos_id, bytes):
+                    pos_id = pos_id.decode()
+                if pos_id:
+                    pos_hash = redis_sync.hgetall(K.orders_position(pos_id)) or {}
+                    pos_decoded = {
+                        (k.decode() if isinstance(k, bytes) else k):
+                        (v.decode() if isinstance(v, bytes) else v)
+                        for k, v in pos_hash.items()
+                    }
+                    memory.held_side = target_side
+                    memory.held_token = pos_decoded.get("instrument_token") or None
+                    strike_raw = pos_decoded.get("strike")
+                    memory.held_strike = int(strike_raw) if strike_raw else None
+                    log.info(
+                        f"vessel sync: redis state={state} pos={pos_id} "
+                        f"token={memory.held_token} strike={memory.held_strike}"
+                    )
 
         # Periodic config hot-reload (Strategy.md §10.3).
         if time.time() >= config_reload_at:

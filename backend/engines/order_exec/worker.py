@@ -522,6 +522,11 @@ def process_signal(
         strategy_version=signal.strategy_version,
     )
 
+    # Vessel-side state transition on confirmed entry fill. Order-exec is the
+    # sole authoritative writer of vessel:state, current_position_id, and
+    # the entries_today counter (Strategy.md §5.5 / §7).
+    new_state = "IN_CE" if signal.side == "CE" else "IN_PE"
+
     pipe = redis_sync.pipeline()
     pipe.hset(
         K.orders_position(pos_id),
@@ -532,6 +537,10 @@ def process_signal(
     pipe.sadd(K.ORDERS_POSITIONS_OPEN, pos_id)
     pipe.sadd(K.orders_positions_open_by_index(signal.index), pos_id)
     pipe.set(K.strategy_current_position_id(signal.index), pos_id)
+    pipe.set(K.strategy_state(signal.index), new_state)
+    if signal.intent == "REVERSAL_FLIP":
+        pipe.incr(K.strategy_counters_reversals_today(signal.index))
+    pipe.incr(K.strategy_counters_entries_today(signal.index))
     pipe.execute()
 
     # ── STAGE D: exit eval loop ─────────────────────────────────────────
@@ -627,10 +636,49 @@ def process_signal(
         redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
     )
 
+    # Vessel-side state transition on confirmed exit fill. Order-exec is the
+    # sole authoritative writer of vessel:state and cooldown_*. Strategy.md §5.5.
+    sid = signal.strategy_id or K.DEFAULT_STRATEGY_ID
+    raw_instr = redis_sync.get(K.strategy_config_instrument(sid, signal.index))
+    instr_cfg: dict[str, Any] = {}
+    if raw_instr:
+        try:
+            instr_cfg = orjson.loads(raw_instr if isinstance(raw_instr, bytes) else raw_instr.encode())
+        except Exception:
+            instr_cfg = {}
+    sl_cooldown = int(instr_cfg.get("post_sl_cooldown_sec", 60))
+    flip_cooldown = int(instr_cfg.get("post_reversal_cooldown_sec", 90))
+    reason_str = exit_reason_resolved.value
+    next_state = "FLAT"
+    cooldown_sec = 0
+    cooldown_reason = ""
+    if reason_str == "STOP_LOSS":
+        next_state = "COOLDOWN"
+        cooldown_sec = sl_cooldown
+        cooldown_reason = "post_sl"
+    elif reason_str == "REVERSAL_FLIP":
+        # The flipped-into entry signal is emitted by strategy on next tick; the
+        # cooldown here only applies if the flip itself isn't immediately re-entered.
+        next_state = "COOLDOWN"
+        cooldown_sec = flip_cooldown
+        cooldown_reason = "post_flip"
+
+    pipe = redis_sync.pipeline()
+    pipe.set(K.strategy_state(signal.index), next_state)
+    if cooldown_sec > 0:
+        pipe.set(K.strategy_cooldown_until_ts(signal.index), str(_now_ts_ms() + cooldown_sec * 1000))
+        pipe.set(K.strategy_cooldown_reason(signal.index), cooldown_reason)
+    else:
+        pipe.set(K.strategy_cooldown_until_ts(signal.index), "0")
+        pipe.set(K.strategy_cooldown_reason(signal.index), "")
+    if report.pnl > 0:
+        pipe.incr(K.strategy_counters_wins_today(signal.index))
+    pipe.execute()
+
     _persist_status(redis_sync, pos_id, PositionStage.DONE)
     log.info(
         f"order_exec[{signal.index}]: closed pos={pos_id} reason={exit_reason_resolved.value} "
-        f"pnl=₹{report.pnl:.2f} ({report.pnl_pct:+.2f}%)"
+        f"pnl=₹{report.pnl:.2f} ({report.pnl_pct:+.2f}%) -> state={next_state}"
     )
 
 

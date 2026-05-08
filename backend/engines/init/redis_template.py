@@ -78,8 +78,18 @@ TEMPLATE: dict[str, dict[str, Any]] = {
     K.MARKET_DATA_WS_STATUS_MARKET: {"type": "hash_empty"},
     K.MARKET_DATA_WS_STATUS_PORTFOLIO: {"type": "hash_empty"},
     # ── orders: allocator + day-counters reset ──────────────────────────
-    K.ORDERS_ALLOCATOR_DEPLOYED: {"type": "str", "value": "0"},
-    K.ORDERS_ALLOCATOR_OPEN_COUNT: {"type": "str", "value": "0"},
+    # NOTE: deployed + open_count are HASH per index (+ "total" field) — the
+    # capital_allocator_check_and_reserve.lua expects HSET/HGET/HINCRBYFLOAT
+    # operations on these keys. Writing them as STRING causes WRONGTYPE
+    # errors during Lua execution and silently rejects every signal.
+    K.ORDERS_ALLOCATOR_DEPLOYED: {
+        "type": "hash",
+        "value": {"nifty50": "0", "banknifty": "0", "total": "0"},
+    },
+    K.ORDERS_ALLOCATOR_OPEN_COUNT: {
+        "type": "hash",
+        "value": {"nifty50": "0", "banknifty": "0", "total": "0"},
+    },
     K.ORDERS_ALLOCATOR_OPEN_SYMBOLS: {"type": "set_empty"},
     K.ORDERS_POSITIONS_OPEN: {"type": "set_empty"},
     K.ORDERS_POSITIONS_CLOSED_TODAY: {"type": "set_empty"},
@@ -299,6 +309,11 @@ async def apply(redis: _redis_async.Redis, flush_runtime: bool = True) -> dict[s
             pipe.set(key, spec["value"])
         elif kind == "json":
             pipe.set(key, orjson.dumps(spec["value"]))
+        elif kind == "hash":
+            # Pre-populated HASH (e.g. allocator deployed/open_count which the
+            # Lua expects as HASH from the first call).
+            pipe.delete(key)
+            pipe.hset(key, mapping=spec["value"])
         elif kind == "hash_empty":
             skipped += 1
             continue
