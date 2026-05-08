@@ -180,52 +180,41 @@ async def _apply_action(
         (spec.context.strategy_config.get("reversal", {}) or {}).get("suppress_sec", 30)
     )
 
+    # IMPORTANT: the runner DOES NOT write `state` for entries/flips.
+    # Order-execution is the authoritative writer. Order-exec sets state to
+    # IN_CE/IN_PE only after a position is confirmed open. Until then the
+    # vessel stays FLAT and the strategy may re-emit the same signal on the
+    # next tick — sig_id is a deterministic hash so duplicates are collapsed
+    # by the allocator's per-vessel cap. This way Redis state never lies
+    # about whether a position is actually open.
     if action.kind == ActionKind.ENTER:
-        sig = await publisher.emit_signal(
+        await publisher.emit_signal(
             redis_async,
             strategy_id=sid,
             instrument_id=idx,
             action=action,
         )
-        if sig:
-            new_state = "IN_CE" if action.side == "CE" else "IN_PE"
-            set_state(redis_sync, sid, idx, new_state)
-            redis_sync.incr(K.vessel_counter_entries(sid, idx))
-            memory.held_token = action.instrument_token
-            memory.held_strike = action.strike
-            memory.held_side = action.side
+        # No state write, no counter increment, no memory mutation.
+        # The next-tick state-sync block will reflect order-exec's outcome.
 
     elif action.kind == ActionKind.FLIP:
-        sig = await publisher.emit_signal(
+        await publisher.emit_signal(
             redis_async,
             strategy_id=sid,
             instrument_id=idx,
             action=action,
         )
-        if sig:
-            new_state = "IN_CE" if action.side == "CE" else "IN_PE"
-            set_state(redis_sync, sid, idx, new_state)
-            redis_sync.incr(K.vessel_counter_reversals(sid, idx))
-            redis_sync.incr(K.vessel_counter_entries(sid, idx))
-            memory.held_token = action.instrument_token
-            memory.held_strike = action.strike
-            memory.held_side = action.side
-            # Schedule a post-reversal cooldown that the order_exec layer will
-            # observe (we DO NOT block re-entry here — it's the next tick's
-            # decision).
+        # State + counters get written by order-exec on confirmed flip fill.
 
     elif action.kind == ActionKind.EXIT:
-        sig = await publisher.emit_signal(
+        await publisher.emit_signal(
             redis_async,
             strategy_id=sid,
             instrument_id=idx,
             action=action,
         )
-        if sig:
-            enter_cooldown(redis_sync, sid, idx, "post_exit", cooldown_sec)
-            memory.held_token = None
-            memory.held_strike = None
-            memory.held_side = None
+        # Order-exec writes state back to FLAT/COOLDOWN on confirmed exit fill.
+        # Strategy's exit signal here is just a request.
 
     elif action.kind == ActionKind.REVERSAL_WARN:
         # Telemetry-only; no signal. Set suppression window.
@@ -372,6 +361,24 @@ async def vessel_loop(
         if state == "HALTED":
             await asyncio.sleep(2.0)
             continue
+
+        # Memory ↔ Redis state sync. Redis is the source of truth (init or
+        # order-exec rejection can reset it externally). If they disagree,
+        # trust Redis and clear in-memory held_* fields to prevent the
+        # strategy from running continuation/reversal logic against a
+        # phantom position.
+        if state in ("FLAT", "COOLDOWN") and (memory.held_side or memory.held_token):
+            log.warning(
+                f"vessel state desync: redis={state} memory.held_side={memory.held_side} "
+                f"held_token={memory.held_token}; clearing memory"
+            )
+            memory.held_side = None
+            memory.held_token = None
+            memory.held_strike = None
+        elif state == "IN_CE" and memory.held_side != "CE":
+            memory.held_side = "CE"
+        elif state == "IN_PE" and memory.held_side != "PE":
+            memory.held_side = "PE"
 
         # Periodic config hot-reload (Strategy.md §10.3).
         if time.time() >= config_reload_at:
