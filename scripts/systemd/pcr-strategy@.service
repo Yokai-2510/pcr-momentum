@@ -1,5 +1,5 @@
 [Unit]
-Description=PCR Momentum – Strategy Engine (per-index decision loop)
+Description=PCR Momentum – Strategy Engine — %i
 After=pcr-init.service
 PartOf=pcr-stack.target
 
@@ -11,12 +11,12 @@ WorkingDirectory=/home/ubuntu/premium_diff_bot/repo/backend
 Environment=PYTHONPATH=/home/ubuntu/premium_diff_bot/repo/backend
 Environment=APP_ENV=prod
 EnvironmentFile=/home/ubuntu/premium_diff_bot/.env
-ExecStart=/home/ubuntu/premium_diff_bot/.venv/bin/python -m engines.strategy
+ExecStart=/home/ubuntu/premium_diff_bot/.venv/bin/python -m engines.strategy --strategy-id=%i
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=pcr-strategy
+SyslogIdentifier=pcr-strategy-%i
 
 [Install]
 WantedBy=pcr-stack.target

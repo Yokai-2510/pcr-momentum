@@ -64,11 +64,18 @@ def _read_json(redis_sync: Any, key: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def discover_vessels(redis_sync: Any) -> list[VesselSpec]:
+def discover_vessels(
+    redis_sync: Any,
+    *,
+    strategy_id_filter: str | None = None,
+) -> list[VesselSpec]:
     """Read `strategy:registry` and resolve every entry into a VesselSpec.
 
-    Entries with an unknown strategy_id are skipped with a warning (init
-    should not have written them, but defensive parse).
+    If `strategy_id_filter` is set (per-strategy OS isolation mode), only
+    entries matching that strategy_id are returned. Otherwise (legacy
+    shared-process mode), all registered vessels are returned.
+
+    Entries with an unknown strategy_id are skipped with a warning.
     """
     log = logger.bind(engine="strategy", component="registry")
     raw_set = redis_sync.smembers(K.STRATEGY_REGISTRY)
@@ -83,6 +90,8 @@ def discover_vessels(redis_sync: Any) -> list[VesselSpec]:
             log.warning(f"registry entry malformed: {entry!r}")
             continue
         sid, _, idx = entry.partition(":")
+        if strategy_id_filter is not None and sid != strategy_id_filter:
+            continue
         if sid not in _STRATEGY_CLASSES:
             log.warning(f"registry entry references unknown strategy_id={sid!r}")
             continue

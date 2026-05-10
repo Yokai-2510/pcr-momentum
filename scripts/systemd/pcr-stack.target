@@ -3,7 +3,10 @@ Description=PCR Momentum Trading Bot – Cyclic Engine Stack
 # Engines must NOT run unless init succeeded today.
 Requires=pcr-init.service
 After=pcr-init.service
-Wants=pcr-scheduler.service pcr-data-pipeline.service pcr-background.service pcr-strategy.service pcr-order-exec.service pcr-health.service
+# Strategy units are template instances — one per registered strategy_id.
+# Adding a new strategy: append `pcr-strategy@<sid>.service` here, then
+# `systemctl daemon-reload` + enable + start the new instance.
+Wants=pcr-scheduler.service pcr-data-pipeline.service pcr-background.service pcr-order-exec.service pcr-health.service pcr-strategy@bid_ask_imbalance_v1.service
 
 [Install]
 WantedBy=multi-user.target

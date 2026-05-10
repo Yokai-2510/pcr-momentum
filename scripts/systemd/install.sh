@@ -7,7 +7,14 @@ REPO=/home/ubuntu/premium_diff_bot/repo
 SYSTEMD_DIR=$REPO/scripts/systemd
 
 echo "==> installing systemd units"
+# pcr-strategy@.service is a template unit. Per-strategy instances are
+# activated by pcr-stack.target's `Wants=pcr-strategy@<sid>.service` lines.
+# Adding a strategy: append a Wants line in pcr-stack.target, re-run this
+# script, then `systemctl enable --now pcr-strategy@<sid>.service`.
+# `pcr-strategy.service` (the legacy singleton) must NOT exist on disk.
+sudo rm -f /etc/systemd/system/pcr-strategy.service
 sudo cp $SYSTEMD_DIR/pcr-*.service $SYSTEMD_DIR/pcr-*.target $SYSTEMD_DIR/pcr-*.timer /etc/systemd/system/
+sudo cp "$SYSTEMD_DIR/pcr-strategy@.service" /etc/systemd/system/pcr-strategy@.service
 sudo chmod 644 /etc/systemd/system/pcr-*.service /etc/systemd/system/pcr-*.target /etc/systemd/system/pcr-*.timer 2>/dev/null || true
 
 echo "==> installing /usr/local/bin/pcr-shutdown.sh"
