@@ -77,29 +77,23 @@ no lua                  : pure Python pipelines / transactions          ←  Ste
 - `[next]`  not started, ordered for next pickup
 - `[skip]`  decided against / out of scope
 
-### Step 1 — Drop Lua scripts, replace with Python   `[next]`
+### Step 1 — Drop Lua scripts, replace with Python   `[done]` (commit `9564ac4`)
 
-**Goal**: remove `state/lua/cleanup_position.lua` and
-`state/lua/capital_allocator_check_and_reserve.lua` plus
-`capital_allocator_release.lua`. Replace with plain Python pipelines /
-`redis.transaction()` for the check-then-mutate cases.
+Replaced both atomic-cleanup and atomic-allocator Lua scripts with plain
+Python.
 
-**Files to change**:
-- `backend/engines/order_exec/cleanup.py` — rewrite as Python pipeline
-- `backend/engines/order_exec/allocator.py` — rewrite using
-  `redis.transaction(...)` helper
-- `backend/state/redis_client.py` — drop `load_script` helper if unused
-- `backend/state/lua/` — delete the two scripts
-- `docs/Modular_Design.md` and `docs/Schema.md` — drop Lua references
+`allocator.py` uses `redis.transaction()` (WATCH/MULTI/EXEC with bounded
+retry) for check-then-mutate. `cleanup.py` uses a sequential
+`pipeline(transaction=False)` since the cleanup thread is the single owner
+of the position keys.
 
-**Why**: cleanup runs from the single owner thread (no racer), allocator
-contention is at most 2 concurrent workers (rare). Lua's atomicity gain
-doesn't earn its debuggability cost.
+Removed: `backend/state/lua/` (entire dir), `redis_client.load_script`,
+`redis_client.clear_script_cache`, `tests/test_lua.py`,
+`tests/test_redis_client.py::TestLuaLoader`.
 
-**Acceptance**:
-- `import` smoke test passes
-- A paper-trade entry + exit cycle on EC2 still cleans up correctly
-- `state/lua/` contains only files unrelated to allocator/cleanup (or is empty)
+Verified live on EC2: full allocator round-trip (reserve/duplicate-reject/
+release/different-index-reserve) returns the expected results. Order-exec
+restarted clean.
 
 ### Step 2 — Per-strategy OS isolation   `[next]`
 
