@@ -16,8 +16,6 @@ Usage:
 
     await r.set("foo", "bar")
     rs.set("baz", "qux")
-
-Lua scripts under `state/lua/` are loaded on demand via `load_script`.
 """
 
 from __future__ import annotations
@@ -36,13 +34,10 @@ _async_pool: _redis_async.ConnectionPool | None = None
 _sync_pool: _redis_sync.ConnectionPool | None = None
 _async_client: _redis_async.Redis | None = None
 _sync_client: _redis_sync.Redis | None = None
-_loaded_scripts: dict[str, Any] = {}
 
 _DEFAULT_SOCKET: Final[str] = "/var/run/redis/redis-server.sock"
 _LEGACY_SOCKET: Final[str] = "/var/run/redis/redis.sock"
 _DEFAULT_MAX_CONNECTIONS: Final[int] = 32
-
-_LUA_DIR: Final[Path] = Path(__file__).parent / "lua"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +123,6 @@ async def close_pools() -> None:
         _sync_pool.disconnect()
     _async_pool = _sync_pool = None
     _async_client = _sync_client = None
-    _loaded_scripts.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -146,33 +140,3 @@ def reset_for_testing() -> None:
     global _async_pool, _sync_pool, _async_client, _sync_client
     _async_pool = _sync_pool = None
     _async_client = _sync_client = None
-    _loaded_scripts.clear()
-
-
-# ---------------------------------------------------------------------------
-# Lua loader
-# ---------------------------------------------------------------------------
-def load_script(name: str) -> Any:
-    """Load a Lua script from `state/lua/{name}.lua`.
-
-    Returns a `Script` object that can be invoked with `.execute(keys, args)`.
-    Cached after first load; the SHA is registered with Redis automatically
-    by redis-py.
-    """
-    if name in _loaded_scripts:
-        return _loaded_scripts[name]
-
-    path = _LUA_DIR / f"{name}.lua"
-    if not path.is_file():
-        raise FileNotFoundError(f"Lua script not found: {path}")
-
-    source = path.read_text(encoding="utf-8")
-    client = get_redis_sync()
-    script = client.register_script(source)
-    _loaded_scripts[name] = script
-    return script
-
-
-def clear_script_cache() -> None:
-    """Forget all loaded scripts. Used between tests."""
-    _loaded_scripts.clear()

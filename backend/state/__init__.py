@@ -7,5 +7,4 @@ Public surface:
     - redis_client: async + sync Redis pool factories
     - postgres_client: asyncpg pool factory + transaction helpers
     - config_loader: .env + config_settings table loader
-    - lua: directory of Lua scripts loaded via redis_client.load_script
 """

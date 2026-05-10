@@ -1,7 +1,7 @@
-"""Tests for engines.order_exec.allocator + the two Lua scripts.
+"""Tests for engines.order_exec.allocator (pure-Python; WATCH/MULTI/EXEC).
 
-Uses fakeredis-with-lua. Each test exercises both the reserve and release
-paths so the symmetry stays correct.
+Each test exercises both the reserve and release paths so the symmetry
+stays correct.
 """
 
 from __future__ import annotations

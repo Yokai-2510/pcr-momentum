@@ -21,12 +21,10 @@ from state import redis_client
 
 @pytest.fixture(autouse=True)
 def _reset_redis_module() -> Iterator[None]:
-    """Forget any cached pools/scripts between tests."""
+    """Forget any cached pools between tests."""
     redis_client.reset_for_testing()
-    redis_client.clear_script_cache()
     yield
     redis_client.reset_for_testing()
-    redis_client.clear_script_cache()
 
 
 @pytest_asyncio.fixture
