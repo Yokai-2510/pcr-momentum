@@ -95,33 +95,26 @@ Verified live on EC2: full allocator round-trip (reserve/duplicate-reject/
 release/different-index-reserve) returns the expected results. Order-exec
 restarted clean.
 
-### Step 2 — Per-strategy OS isolation   `[next]`
+### Step 2 — Per-strategy OS isolation   `[done]` (commit `ae1b98c`)
 
-**Goal**: one OS process per strategy_id, instead of one shared
-asyncio process hosting all strategies.
+Each strategy runs in its own OS process via systemd template unit
+`pcr-strategy@.service` parameterized by `%i = strategy_id`.
 
-**Files to change**:
-- New: `scripts/systemd/pcr-strategy@.service` (template unit, parameterized by `%i`)
-- Delete: `scripts/systemd/pcr-strategy.service` (the singleton)
-- `backend/engines/strategy/main.py` — accept `--strategy-id=<sid>` CLI arg;
-  on start, filter `strategy:registry` to only this strategy's vessels
-- `backend/engines/strategy/registry.py` — add `discover_for_strategy(sid)` filter
-- `backend/engines/init/main.py` — at end of init, iterate registered strategies
-  and `systemctl start pcr-strategy@<sid>.service` for each
-- `scripts/systemd/install.sh` — install the template unit
-- `pcr-stack.target` — replace single `Wants=pcr-strategy.service` with
-  dynamic enables (or rely on init to start instances)
+**Adding a new strategy** (operator workflow):
 
-**How an LLM adds a new strategy after this lands**:
-1. Author the new Strategy class under `engines/strategy/strategies/<name>/`
-2. INSERT row into Postgres `strategy_definitions`
-3. SADD `strategy:registry` `<sid>:<idx>` for each instrument
+1. Author `Strategy` subclass under `engines/strategy/strategies/<name>/`
+2. INSERT into Postgres `strategy_definitions`; `SADD strategy:registry "<sid>:<idx>"` for each instrument
+3. Append `Wants=pcr-strategy@<sid>.service` to `scripts/systemd/pcr-stack.target`,
+   re-run `scripts/systemd/install.sh`, `sudo systemctl daemon-reload`
 4. `sudo systemctl enable --now pcr-strategy@<sid>.service`
 
-**Acceptance**:
-- `systemctl status pcr-strategy@bid_ask_imbalance_v1.service` is active during trading hours
-- Killing one strategy process does not affect others (`systemctl stop pcr-strategy@<sid>` leaves siblings running)
-- Init engine logs `enabled+started 1 strategy services`
+**Verified live on EC2**: `pcr-strategy@bid_ask_imbalance_v1.service` boots
+clean, registry filter picks only the two matching vessels, basket build
+runs, FRESH_ENTRY signals emit. Heartbeat field is `strategy:bid_ask_imbalance_v1`,
+engine_up flag is `engine_up:strategy:bid_ask_imbalance_v1`.
+
+Health probe (`probe_engines`) is generic — iterates all heartbeat fields
+— so the per-strategy heartbeat shows up automatically in `/api/health`.
 
 ### Step 3 — Schema simplification   `[next]`
 
