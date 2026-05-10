@@ -25,11 +25,28 @@ def evaluate(
     now_ts_ms: int,
     now_hhmm: str,
     daily_loss_circuit_triggered: bool,
+    strategy_exit_pull: str | None = None,
     eod_squareoff_hhmm: str = "15:15",
     liquidity_suppress_after_hhmm: str = "15:00",
     spread_skip_pct: float = 0.05,
 ) -> tuple[bool, ExitReason | None]:
-    """Run the 8-trigger cascade. Returns (False, None) if no exit yet."""
+    """Run the trigger cascade. Returns (False, None) if no exit yet.
+
+    Triggers in priority order:
+      0. Strategy-emitted EXIT signal (`orders:exit_pull:{pos_id}` flag set)
+      1. Daily-loss circuit
+      2. EOD square-off
+      3. Hard stop loss
+      4. Hard profit target
+      5. Trailing stop loss
+      6. Liquidity exit (suppressed near EOD)
+      7. Time exit
+    """
+
+    # 0. Strategy-emitted EXIT (flag-driven; highest priority because the
+    #    strategy already saw something we don't want to keep holding through).
+    if strategy_exit_pull:
+        return True, ExitReason.STRATEGY_EXIT
 
     # 1. Daily Loss Circuit
     if daily_loss_circuit_triggered:

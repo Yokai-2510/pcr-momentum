@@ -273,6 +273,9 @@ class BidAskImbalanceStrategy:
                     return Action(
                         ActionKind.EXIT,
                         side=memory.held_side,
+                        strike=memory.held_strike,
+                        instrument_token=memory.held_token,
+                        qty_lots=int(ctx.instrument_config.get("qty_lots", 1)),
                         reason="reversal_triggered_no_flip_target",
                         metrics={**base_metrics, "reversal_triggers": rev.triggers},
                     )
@@ -301,6 +304,9 @@ class BidAskImbalanceStrategy:
                 return Action(
                     ActionKind.EXIT,
                     side=memory.held_side,
+                    strike=memory.held_strike,
+                    instrument_token=memory.held_token,
+                    qty_lots=int(ctx.instrument_config.get("qty_lots", 1)),
                     reason=f"continuation_failed:{','.join(cont.failures[:3])}",
                     metrics={**base_metrics, "continuation_failures": cont.failures},
                 )

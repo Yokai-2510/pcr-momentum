@@ -148,6 +148,34 @@ async def dispatcher_loop(
                     log.warning(f"unparseable signal entry {entry_id!r}; ACKing and dropping")
                     await redis_async.xack(K.STRATEGY_STREAM_SIGNALS, CONSUMER_GROUP, entry_id)  # type: ignore[misc]
                     continue
+
+                # MANUAL_EXIT signals (emitted by the strategy when its
+                # continuation evaluator says EXIT) do not allocate a new
+                # pos_id or run the entry pipeline. We set a per-position
+                # pull flag that the monitor loop reads as exit_eval
+                # trigger #0. Reference: Strategy.md §5 (decision logic) +
+                # `state/keys.py::orders_exit_pull`.
+                intent_value = (
+                    sig.intent.value if hasattr(sig.intent, "value") else str(sig.intent)
+                )
+                if intent_value == "MANUAL_EXIT":
+                    cur_pos_id_raw = await redis_async.get(  # type: ignore[misc]
+                        K.strategy_current_position_id(sig.index)
+                    )
+                    cur_pos_id = _decode(cur_pos_id_raw)
+                    if cur_pos_id:
+                        flag_value = f"STRATEGY_EXIT:{(payload.get('reason') or 'strategy_request')[:120]}"
+                        await redis_async.set(K.orders_exit_pull(cur_pos_id), flag_value)  # type: ignore[misc]
+                        log.info(
+                            f"exit_pull set for pos={cur_pos_id} idx={sig.index} sig={sig.sig_id}"
+                        )
+                    else:
+                        log.warning(
+                            f"EXIT signal for {sig.index} but no current_position_id; dropping"
+                        )
+                    await redis_async.xack(K.STRATEGY_STREAM_SIGNALS, CONSUMER_GROUP, entry_id)  # type: ignore[misc]
+                    continue
+
                 work_queue.put(sig)
                 await redis_async.xack(K.STRATEGY_STREAM_SIGNALS, CONSUMER_GROUP, entry_id)  # type: ignore[misc]
                 log.info(f"dispatched sig={sig.sig_id} index={sig.index} side={sig.side}")

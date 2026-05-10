@@ -133,6 +133,9 @@ def build_snapshot(
     option_chain: dict[str, Any],
     spot: dict[str, Any] | None,
     snapshot_ts: int,
+    pinned_token: str | None = None,
+    pinned_side: str | None = None,
+    pinned_strike: int | None = None,
 ) -> Snapshot:
     """Build a Snapshot from raw Redis data.
 
@@ -141,6 +144,12 @@ def build_snapshot(
 
     Each leaf carries the full 5-level depth fields written by the data
     pipeline (Strategy.md §9.1).
+
+    `pinned_*` lets the caller force a specific (token, side, strike) into
+    the snapshot even if it has been dropped by the dynamic ATM basket.
+    Used so a vessel holding a position can always run continuation /
+    reversal evaluation on the held strike, regardless of where ATM has
+    drifted (Strategy.md §3.2).
     """
     ce_legs: list[StrikeLeg] = []
     for strike, token in basket_ce:
@@ -153,6 +162,22 @@ def build_snapshot(
     for strike, token in basket_pe:
         leaf = (option_chain.get(str(strike)) or {}).get("pe")
         pe_legs.append(_build_leg(token, strike, "PE", leaf))
+
+    # Pin the held leg if it isn't already in the basket.
+    if (
+        pinned_token
+        and pinned_side in ("CE", "PE")
+        and pinned_strike is not None
+    ):
+        target_legs = ce_legs if pinned_side == "CE" else pe_legs
+        already = any(leg.token == pinned_token for leg in target_legs)
+        if not already:
+            leaf = (option_chain.get(str(pinned_strike)) or {}).get(pinned_side.lower())
+            pinned_leg = _build_leg(pinned_token, pinned_strike, pinned_side, leaf)
+            if pinned_side == "CE":
+                ce_legs.append(pinned_leg)
+            else:
+                pe_legs.append(pinned_leg)
 
     spot_val = _coerce_float((spot or {}).get("ltp"))
     spot_ts = _coerce_int((spot or {}).get("ts")) or 0

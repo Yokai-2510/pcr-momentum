@@ -367,6 +367,19 @@ def orders_status(pos_id: str) -> str:
     return f"orders:status:{pos_id}"
 
 
+def orders_exit_pull(pos_id: str) -> str:
+    """STRING flag — set by the order-exec dispatcher when a strategy-emitted
+    EXIT signal arrives. Read and consumed by `exit_eval` as trigger #0
+    (priority above SL/target/TSL). Format:
+
+        f"STRATEGY_EXIT:<reason>"   e.g.  "STRATEGY_EXIT:continuation_failed"
+
+    The worker DELs the key once the resulting exit has been processed
+    through cleanup.
+    """
+    return f"orders:exit_pull:{pos_id}"
+
+
 def orders_broker_pos(order_id: str) -> str:
     return f"orders:broker:pos:{order_id}"
 

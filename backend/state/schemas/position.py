@@ -25,6 +25,7 @@ class ExitReason(StrEnum):
     LIQUIDITY = "LIQUIDITY"
     DAILY_LOSS_CIRCUIT = "DAILY_LOSS_CIRCUIT"
     MANUAL = "MANUAL"
+    STRATEGY_EXIT = "STRATEGY_EXIT"
 
 
 class PositionStage(StrEnum):

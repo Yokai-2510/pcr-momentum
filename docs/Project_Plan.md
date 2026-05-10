@@ -463,10 +463,45 @@ sections):
 [done]      Phase 8   — Background / Scheduler / Health
 [done]      Phase 9   — FastAPI gateway
 [done]      Phase 11  — Hardening / systemd / TLS / nginx / backups
-[next]      Phase 10a — Frontend (core operator dashboard, Vercel-hosted)
+[next]      Phase 7.1 — Order-exec monitor refactor (singleton scan-loop;
+                        restart-safe position adoption)
+            Phase 10a — Frontend (core operator dashboard, Vercel-hosted)
             Phase 10b — Frontend analytics + backend rollup endpoints
             Phase 12  — Paper-trade validation (5 days) → live
 ```
+
+### Phase 7.1 — Order-exec monitor refactor (open architectural debt)
+
+**Problem.** Today the position-monitor loop (Stage D + E + F: exit-eval, exit-submit, reporting, cleanup) lives inside `engines.order_exec.worker.process_signal()`, in the same thread that handled the entry signal. Consequences:
+
+1. If `pcr-order-exec` is restarted (deploy, OOM, drain) while a position is open, the worker thread is killed mid-loop. The position record stays in `orders:positions:open` but no thread is monitoring it: live PnL stops updating, the strategy-emitted `orders:exit_pull:{pos_id}` flag is never read, the SL/target/TSL cascade never fires, and the allocator slot is never released.
+2. Strategy-emitted EXIT signals route through the same code path as fresh entries by allocating a new `pos_id` — they should hand off to the existing position, not start a new one. (Worked around for now via the exit-pull flag the dispatcher writes; the worker reads it inside its own monitor loop, so this works while the worker is alive.)
+
+**Target architecture.** Split signal handling and position monitoring into two independent loops:
+
+```
+SIGNAL HANDLER (worker thread; ephemeral, one per signal):
+    pre_entry_gate → allocator reserve → entry_submit → wait fill
+    → write Position HASH + monitor-context blob → state IN_CE/IN_PE
+    → return.
+
+POSITION MONITOR (single thread; persistent, restart-safe):
+    every MONITOR_TICK_MS:
+      for pos_id in orders:positions:open:
+        load Position + monitor-context
+        update_trailing + live PnL + holding_seconds
+        read orders:exit_pull:{pos_id} flag
+        exit_eval cascade (with strategy_exit_pull as trigger #0)
+        if should_exit:
+            exit_submit → reporting → cleanup → allocator release
+            → vessel state FLAT/COOLDOWN → DEL exit_pull
+```
+
+The monitor adopts any position present in `orders:positions:open` on startup, so order-exec restarts no longer strand positions.
+
+**New file**: `engines/order_exec/monitor.py`. **Modified**: `worker.py` (strip Stage D-F into monitor; persist monitor-context blob after Stage C and return), `main.py` (spawn monitor thread alongside dispatcher + workers).
+
+**Out of scope until Phase 7.1 lands**: order-exec restarts during a live session leave positions unmonitored until the next signal handler runs Stage D against them.
 
 ### Notes
 - Phases 1-2 are tightly coupled; ship them together.

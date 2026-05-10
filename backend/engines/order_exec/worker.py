@@ -62,12 +62,16 @@ _IST = ZoneInfo("Asia/Kolkata")
 EXIT_POLL_SLEEP_SEC = 0.5  # how often to re-evaluate exit cascade
 
 # Mutated-each-tick fields written back to orders:positions:{pos_id} HASH
-# during the exit-eval loop (Bug-4 fix).
+# during the exit-eval loop. `pnl` and `pnl_pct` are recomputed in-loop so
+# the position record always reflects the live mark-to-market.
 _HASH_REFRESH_FIELDS = (
     "peak_premium",
     "tsl_armed",
     "tsl_level",
     "current_premium",
+    "pnl",
+    "pnl_pct",
+    "holding_seconds",
 )
 
 
@@ -557,7 +561,26 @@ def process_signal(
             cur_premium = position.current_premium
 
         position = exit_eval.update_trailing_state(position, current_premium=cur_premium)
-        # Bug-4 fix: persist mutated fields back to the HASH each tick.
+
+        # Live mark-to-market on the position record (read by /positions/open
+        # and frontend dashboard) plus the global `orders:pnl:unrealized` sum.
+        entry_price = float(position.entry_price or 0.0)
+        qty = int(position.qty or 0)
+        if entry_price > 0 and qty > 0:
+            pnl_inr = round((cur_premium - entry_price) * qty, 4)
+            pnl_pct = round((cur_premium / entry_price - 1.0) * 100.0, 4)
+        else:
+            pnl_inr = 0.0
+            pnl_pct = 0.0
+        holding_seconds = max(
+            0,
+            (_now_ts_ms() - int(position.entry_ts.timestamp() * 1000)) // 1000,
+        )
+        position = position.model_copy(update={
+            "pnl": pnl_inr,
+            "pnl_pct": pnl_pct,
+            "holding_seconds": int(holding_seconds),
+        })
         _refresh_position_hash(redis_sync, position, _HASH_REFRESH_FIELDS)
 
         if position.tsl_armed:
@@ -567,6 +590,13 @@ def process_signal(
                 "tsl_level": position.tsl_level,
             })
 
+        # Read the strategy-emitted exit-pull flag (Strategy.md §5.3 — exit
+        # decisions emitted by the vessel land here as a per-position flag
+        # rather than a separate code path; exit_eval honours them as
+        # trigger #0).
+        strategy_pull_raw = redis_sync.get(K.orders_exit_pull(pos_id))
+        strategy_pull = _decode(strategy_pull_raw) or None
+
         daily_loss = _decode(redis_sync.get(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED)) == "true"
         should_exit, reason_enum = exit_eval.evaluate(
             position,
@@ -575,6 +605,7 @@ def process_signal(
             now_ts_ms=_now_ts_ms(),
             now_hhmm=_now_hhmm(),
             daily_loss_circuit_triggered=daily_loss,
+            strategy_exit_pull=strategy_pull,
         )
         exit_eval_history.append({
             "ts_ms": _now_ts_ms(),
@@ -635,6 +666,8 @@ def process_signal(
     allocator.release(
         redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
     )
+    # Clear any strategy exit-pull flag now that we've acted on it.
+    redis_sync.delete(K.orders_exit_pull(pos_id))
 
     # Vessel-side state transition on confirmed exit fill. Order-exec is the
     # sole authoritative writer of vessel:state and cooldown_*. Strategy.md §5.5.
@@ -648,20 +681,20 @@ def process_signal(
             instr_cfg = {}
     sl_cooldown = int(instr_cfg.get("post_sl_cooldown_sec", 60))
     flip_cooldown = int(instr_cfg.get("post_reversal_cooldown_sec", 90))
+    strategy_exit_cooldown = int(instr_cfg.get("post_strategy_exit_cooldown_sec", 30))
+
+    # Table-driven cooldown by exit reason. Anything not in the table → no
+    # cooldown, vessel goes straight to FLAT. Centralizes the rule so adding
+    # a new ExitReason only requires one row here.
+    cooldown_by_reason: dict[str, tuple[int, str]] = {
+        "HARD_SL":         (sl_cooldown,             "post_sl"),
+        "TRAILING_SL":     (sl_cooldown,             "post_tsl"),
+        "REVERSAL_FLIP":   (flip_cooldown,           "post_flip"),
+        "STRATEGY_EXIT":   (strategy_exit_cooldown,  "post_strategy_exit"),
+    }
     reason_str = exit_reason_resolved.value
-    next_state = "FLAT"
-    cooldown_sec = 0
-    cooldown_reason = ""
-    if reason_str == "STOP_LOSS":
-        next_state = "COOLDOWN"
-        cooldown_sec = sl_cooldown
-        cooldown_reason = "post_sl"
-    elif reason_str == "REVERSAL_FLIP":
-        # The flipped-into entry signal is emitted by strategy on next tick; the
-        # cooldown here only applies if the flip itself isn't immediately re-entered.
-        next_state = "COOLDOWN"
-        cooldown_sec = flip_cooldown
-        cooldown_reason = "post_flip"
+    cooldown_sec, cooldown_reason = cooldown_by_reason.get(reason_str, (0, ""))
+    next_state = "COOLDOWN" if cooldown_sec > 0 else "FLAT"
 
     pipe = redis_sync.pipeline()
     pipe.set(K.strategy_state(signal.index), next_state)

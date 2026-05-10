@@ -409,7 +409,10 @@ async def vessel_loop(
         if int(time.time() * 1000) - last_basket_check_ms > 1000:
             await ensure_basket()
 
-        # Build snapshot
+        # Build snapshot. If a position is held but its strike has been
+        # dropped from the basket by an ATM shift, pin it into the snapshot
+        # so continuation / reversal evaluators have visibility on the
+        # held leg (Strategy.md §3.2 + §5.3).
         ts_ms = int(time.time() * 1000)
         chain = _read_json(redis_sync, K.market_data_index_option_chain(idx)) or {}
         spot_hash = _read_spot_hash(redis_sync, idx)
@@ -421,6 +424,9 @@ async def vessel_loop(
             option_chain=chain,
             spot=spot_hash,
             snapshot_ts=ts_ms,
+            pinned_token=memory.held_token,
+            pinned_side=memory.held_side,
+            pinned_strike=memory.held_strike,
         )
 
         # Strategy decision (pure)
