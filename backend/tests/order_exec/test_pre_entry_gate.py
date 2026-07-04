@@ -74,6 +74,36 @@ def _seed_world(
     redis.set(K.STRATEGY_CONFIGS_EXECUTION, orjson.dumps({"spread_skip_pct": 0.05}))
 
 
+def test_gate_blocks_stale_signal(fake_redis_sync: Any) -> None:
+    """Guardrail: a signal decided >signal_max_age_sec ago must be rejected
+    (ghost-entry protection — the decision price no longer exists)."""
+    _seed_world(fake_redis_sync)
+    _seed_chain(fake_redis_sync, "nifty50", "NSE_FO|49520", ltp=100, bid=99.5, ask=100.5)
+    sig = _signal()
+    stale = sig.model_copy(
+        update={"decision_ts": int(datetime.now(UTC).timestamp() * 1000) - 60_000}
+    )
+    ok, reason = pre_entry_gate.check(fake_redis_sync, stale)
+    assert ok is False
+    assert reason.startswith("signal_stale:")
+
+
+def test_gate_stale_threshold_configurable(fake_redis_sync: Any) -> None:
+    _seed_world(fake_redis_sync)
+    _seed_chain(fake_redis_sync, "nifty50", "NSE_FO|49520", ltp=100, bid=99.5, ask=100.5)
+    # Raise the threshold to 120 s: the 60 s-old signal now passes.
+    fake_redis_sync.set(
+        K.STRATEGY_CONFIGS_EXECUTION,
+        orjson.dumps({"spread_skip_pct": 0.05, "signal_max_age_sec": 120}),
+    )
+    sig = _signal()
+    stale = sig.model_copy(
+        update={"decision_ts": int(datetime.now(UTC).timestamp() * 1000) - 60_000}
+    )
+    ok, reason = pre_entry_gate.check(fake_redis_sync, stale)
+    assert ok is True, reason
+
+
 def test_gate_pass_happy(fake_redis_sync: Any) -> None:
     _seed_world(fake_redis_sync)
     _seed_chain(fake_redis_sync, "nifty50", "NSE_FO|49520", ltp=100, bid=99.5, ask=100.5)

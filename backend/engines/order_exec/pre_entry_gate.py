@@ -22,6 +22,7 @@ check_and_reserve(...)    -> (ok: bool, reason: str, premium_reserved: float)
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import orjson
@@ -118,6 +119,17 @@ def _read_instrument_config(
 
 def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
     """Read-only gates. (True, "ok") on full pass."""
+    # 0. Signal freshness — reject signals whose decision is older than
+    #    `signal_max_age_sec` (execution config; default 10 s). Guards against
+    #    ghost entries from replayed/queued signals after an outage: the
+    #    price the strategy decided on no longer exists.
+    exec_cfg = _read_execution_config(redis_sync)
+    max_age_sec = float(exec_cfg.get("signal_max_age_sec") or 10)
+    if signal.decision_ts > 0 and max_age_sec > 0:
+        age_sec = (time.time() * 1000 - signal.decision_ts) / 1000.0
+        if age_sec > max_age_sec:
+            return False, f"signal_stale:{age_sec:.1f}s"
+
     # 1. Trading active
     if _decode(redis_sync.get(K.SYSTEM_FLAGS_TRADING_ACTIVE)) != "true":
         return False, "trading_inactive"
@@ -138,8 +150,7 @@ def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
     leaf = _read_leaf_for_token(redis_sync, signal.index, signal.instrument_token)
     if leaf is None:
         return False, "leaf_missing"
-    cfg = _read_execution_config(redis_sync)
-    spread_skip_pct = float(cfg.get("spread_skip_pct") or 0.05)
+    spread_skip_pct = float(exec_cfg.get("spread_skip_pct") or 0.05)
 
     ltp = float(leaf.get("ltp") or 0)
     bid = float(leaf.get("bid") or 0)

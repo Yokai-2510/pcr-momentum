@@ -85,6 +85,15 @@ async def _amain() -> int:
         threads.append(t)
     log.info(f"order_exec: started {pool_size} worker threads")
 
+    # Restart-safety (Phase A5): re-attach monitors to any positions that
+    # were open when the previous process died, BEFORE consuming new signals.
+    try:
+        resumed = worker.resume_open_positions(redis_sync, work_queue)
+        if resumed:
+            log.warning(f"order_exec: resumed monitoring for {resumed} open position(s)")
+    except Exception as e:
+        log.exception(f"order_exec: resume_open_positions failed: {e!r}")
+
     redis_sync.set(K.system_flag_engine_up("order_exec"), "true")
     redis_sync.hset(
         K.SYSTEM_HEALTH_HEARTBEATS,

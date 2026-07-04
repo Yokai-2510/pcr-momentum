@@ -32,6 +32,7 @@ from __future__ import annotations
 import queue
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -55,7 +56,7 @@ from engines.order_exec import (
 from state import keys as K
 from state.schemas.position import ExitProfile, ExitReason, Position, PositionStage
 from state.schemas.report import MarketSnapshot
-from state.schemas.signal import Signal
+from state.schemas.signal import Signal, SignalIntent
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -570,6 +571,48 @@ def process_signal(
     pipe.incr(K.vessel_counter_entries(signal.strategy_id, signal.index))
     pipe.execute()
 
+    # ── STAGES D→F: monitor until exit, then close + report + cleanup ──
+    # Extracted so a restarted engine can re-attach to open positions
+    # (resume_open_positions) without replaying entry.
+    _monitor_and_close(
+        redis_sync,
+        signal=signal,
+        position=position,
+        pos_id=pos_id,
+        mode=mode,
+        access_token=access_token,
+        premium_reserved=premium_reserved,
+        entry_result=entry_result,
+        market_snapshot_entry=market_snapshot_entry,
+        pre_open_snapshot=pre_open_snapshot,
+        signal_snapshot=signal_snapshot,
+        signal_received_ts_ms=signal_received_ts_ms,
+        log=log,
+    )
+
+
+def _monitor_and_close(
+    redis_sync: _redis_sync.Redis,
+    *,
+    signal: Signal,
+    position: Position,
+    pos_id: str,
+    mode: str,
+    access_token: str,
+    premium_reserved: float,
+    entry_result: entry_mod.EntryResult,
+    market_snapshot_entry: dict[str, Any],
+    pre_open_snapshot: dict[str, Any],
+    signal_snapshot: dict[str, Any],
+    signal_received_ts_ms: int,
+    log: Any,
+) -> None:
+    """Stages D→F: exit-eval loop, exit submit, report, cleanup, release.
+
+    Called in-line by `process_signal` after entry, and by `resume_monitor`
+    when a restarted engine re-attaches to a position that was already open
+    (restart-safe monitoring — Phase A5).
+    """
     # ── STAGE D: exit eval loop ─────────────────────────────────────────
     _persist_status(redis_sync, pos_id, PositionStage.EXIT_EVAL)
     exit_eval_history: list[dict[str, Any]] = []
@@ -757,6 +800,123 @@ def process_signal(
     )
 
 
+@dataclass(slots=True)
+class ResumeMonitor:
+    """Work item: re-attach the D→F monitor to an already-open position."""
+
+    pos_id: str
+    position: Position
+    signal: Signal
+
+
+def _rehydrate_signal(redis_sync: _redis_sync.Redis, position: Position) -> Signal | None:
+    """Rebuild the originating Signal for an open position.
+
+    Prefers the persisted signal blob (strategy:signal:{sig_id} lives until
+    cleanup); falls back to synthesizing from the position record.
+    """
+    raw = redis_sync.get(K.strategy_signal(position.sig_id))
+    if raw:
+        try:
+            payload = orjson.loads(raw if isinstance(raw, bytes) else str(raw).encode())
+            return Signal.model_validate(payload)
+        except Exception as e:
+            logger.bind(pos_id=position.pos_id).warning(f"resume: signal blob invalid: {e!r}")
+    sid = position.strategy_version  # carries strategy_id (see report/build)
+    try:
+        return Signal(
+            sig_id=position.sig_id,
+            strategy_id=sid,
+            instrument_id=position.index,
+            index=position.index,
+            side=position.side,
+            strike=int(position.strike),
+            instrument_token=position.instrument_token,
+            intent=(
+                SignalIntent.REVERSAL_FLIP
+                if position.intent == "REVERSAL_FLIP"
+                else SignalIntent.FRESH_ENTRY
+            ),
+            qty_lots=max(1, int(position.qty)),
+            decision_ts=int(position.entry_ts.timestamp() * 1000),
+            ts=position.entry_ts,
+        )
+    except Exception as e:
+        logger.bind(pos_id=position.pos_id).error(f"resume: cannot synthesize signal: {e!r}")
+        return None
+
+
+def resume_open_positions(
+    redis_sync: _redis_sync.Redis,
+    work_queue: queue.Queue,
+) -> int:
+    """Restart-safety (Phase A5): enqueue a monitor for every open position.
+
+    Called once at engine boot, BEFORE the dispatcher starts consuming new
+    signals. Without this, an order-exec restart orphans open positions —
+    no SL / target / TSL / max-hold monitoring until manual intervention.
+    """
+    log = logger.bind(engine="order_exec", component="resume")
+    raw_ids = redis_sync.smembers(K.ORDERS_POSITIONS_OPEN) or set()
+    resumed = 0
+    for raw in raw_ids:
+        pos_id = raw.decode() if isinstance(raw, bytes) else str(raw)
+        position = _load_position_from_hash(redis_sync, pos_id)
+        if position is None:
+            log.warning(f"resume: open-set references {pos_id} but hash is unloadable; skipping")
+            continue
+        if position.exit_ts is not None:
+            continue  # already closed; cleanup will reap it
+        signal = _rehydrate_signal(redis_sync, position)
+        if signal is None:
+            continue
+        work_queue.put(ResumeMonitor(pos_id=pos_id, position=position, signal=signal))
+        resumed += 1
+        log.info(
+            f"resume: re-attaching monitor to {pos_id} "
+            f"({position.side} {position.strike} {position.index}, mode={position.mode})"
+        )
+    return resumed
+
+
+def resume_monitor(redis_sync: _redis_sync.Redis, item: ResumeMonitor) -> None:
+    """Run stages D→F for a position that was open across a restart."""
+    position = item.position
+    signal = item.signal
+    log = logger.bind(engine="order_exec", index=position.index, pos_id=item.pos_id)
+
+    # Exit in the MODE the position was opened in (a live position must be
+    # closed live even if the operator has since flipped to paper).
+    mode = position.mode
+    access_token = _read_access_token(redis_sync) if mode == "live" else ""
+
+    # Reconstruct the entry result from the durable position record.
+    entry_result = entry_mod.EntryResult(
+        filled_qty=int(position.qty),
+        avg_fill_price=float(position.entry_price),
+        order_id=position.entry_order_id,
+    )
+    # Canonical released figure — same convention as the flip-close path.
+    premium_reserved = float(position.entry_price) * float(position.qty)
+
+    _persist_status(redis_sync, item.pos_id, PositionStage.EXIT_EVAL, "resumed_after_restart")
+    _monitor_and_close(
+        redis_sync,
+        signal=signal,
+        position=position,
+        pos_id=item.pos_id,
+        mode=mode,
+        access_token=access_token,
+        premium_reserved=premium_reserved,
+        entry_result=entry_result,
+        market_snapshot_entry={},
+        pre_open_snapshot={},
+        signal_snapshot=signal.model_dump(mode="json"),
+        signal_received_ts_ms=_now_ts_ms(),
+        log=log,
+    )
+
+
 def worker_loop(
     work_queue: queue.Queue,
     redis_sync: _redis_sync.Redis,
@@ -770,10 +930,14 @@ def worker_loop(
             log.info("worker_loop: shutdown sentinel received; exiting")
             work_queue.task_done()
             return
-        signal: Signal = item
         try:
-            process_signal(redis_sync, pool, signal)
+            if isinstance(item, ResumeMonitor):
+                resume_monitor(redis_sync, item)
+            else:
+                signal: Signal = item
+                process_signal(redis_sync, pool, signal)
         except Exception as e:
-            log.exception(f"worker failed on {signal.sig_id}: {e!r}")
+            ident = item.pos_id if isinstance(item, ResumeMonitor) else item.sig_id
+            log.exception(f"worker failed on {ident}: {e!r}")
         finally:
             work_queue.task_done()
