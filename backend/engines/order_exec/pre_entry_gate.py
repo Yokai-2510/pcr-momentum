@@ -96,6 +96,15 @@ def _read_risk_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _read_strategy_config(redis_sync: _redis_sync.Redis, strategy_id: str) -> dict[str, Any]:
+    raw = redis_sync.get(K.strategy_config(strategy_id))
+    if not raw:
+        return {}
+    blob = raw if isinstance(raw, bytes) else raw.encode()
+    parsed = orjson.loads(blob)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _read_instrument_config(
     redis_sync: _redis_sync.Redis, strategy_id: str, index: str
 ) -> dict[str, Any]:
@@ -192,12 +201,21 @@ def check_and_reserve(
     if premium_required <= 0:
         return False, "allocator_premium_zero", 0.0
 
+    # Per-strategy caps (0 = unlimited within the global envelope). Each
+    # strategy carries its own capital allocation in its config blob.
+    strat_cfg = _read_strategy_config(redis_sync, signal.strategy_id)
+    strategy_capital = float(strat_cfg.get("capital_inr") or 0)
+    strategy_max_parallel = int(strat_cfg.get("max_parallel_positions") or 0)
+
     ok2, alloc_reason, _dep, _cnt = allocator.check_and_reserve(
         redis_sync,
+        strategy_id=signal.strategy_id,
         index=signal.index,
         premium_required_inr=premium_required,
         trading_capital_inr=trading_capital,
         max_concurrent_positions=max_concurrent,
+        strategy_capital_inr=strategy_capital,
+        strategy_max_parallel=strategy_max_parallel,
     )
     if not ok2:
         return False, f"allocator_{alloc_reason.lower()}", 0.0

@@ -214,6 +214,7 @@ def test_bug3_allocator_blocks_when_index_already_open(
     # Pre-reserve to occupy the slot.
     ok, _, _, _ = alloc_mod.check_and_reserve(
         fake_redis_sync,
+        strategy_id="bid_ask_imbalance_v1",
         index="nifty50",
         premium_required_inr=5_000.0,
         trading_capital_inr=200_000.0,
@@ -230,7 +231,7 @@ def test_bug3_allocator_blocks_when_index_already_open(
         (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
         for k, v in fields.items()
     }
-    assert decoded.get("reason") == "allocator_already_open_on_index"
+    assert decoded.get("reason") == "allocator_already_open_on_vessel"
 
 
 def test_bug3_allocator_releases_on_clean_close(

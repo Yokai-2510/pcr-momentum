@@ -399,7 +399,9 @@ def _close_existing_position_for_flip(
     # as the canonical released figure since worst-case ask is no longer
     # observable here).
     released_premium = float(prior.entry_price) * float(prior.qty)
-    allocator.release(redis_sync, index=index, premium_to_release_inr=released_premium)
+    allocator.release(
+        redis_sync, strategy_id=strategy_id, index=index, premium_to_release_inr=released_premium
+    )
 
     _persist_status(redis_sync, cur_pos_id, PositionStage.DONE)
     log.info(f"REVERSAL_FLIP: prior position {cur_pos_id} closed")
@@ -485,6 +487,7 @@ def process_signal(
         # Release the reservation we held for this attempt.
         allocator.release(
             redis_sync,
+            strategy_id=signal.strategy_id,
             index=signal.index,
             premium_to_release_inr=premium_reserved,
         )
@@ -696,6 +699,7 @@ def process_signal(
     # Release the allocator slot now that the position is closed.
     allocator.release(
         redis_sync,
+        strategy_id=signal.strategy_id,
         index=signal.index,
         premium_to_release_inr=premium_reserved,
     )
