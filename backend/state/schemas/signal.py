@@ -9,9 +9,16 @@ v2 changes (from premium-diff v1):
   + score, score_breakdown          quality score from §4.8
   + net_pressure_at_signal          Strategy.md §4.7
   + decision_ts                     ms since epoch
-  - Legacy premium-diff fields kept ONLY for backward compat with the
-    existing dispatcher; will be removed in Phase F when premium_diff/ is
-    deleted.
+
+v3 changes (Step 3 schema trim):
+  + metrics_at_signal               free-form numeric metrics blob — each
+    strategy defines its own metric names; consumed only for forensics /
+    attribution, never for routing.
+  - Dropped deprecated premium-diff legacy fields (diff_at_signal,
+    sum_ce_at_signal, sum_pe_at_signal, delta_at_signal,
+    delta_pcr_at_signal, strategy_version).
+  - instrument_id / index relaxed from a hardcoded index Literal to str so
+    stock-universe strategies can emit signals.
 """
 
 from __future__ import annotations
@@ -43,19 +50,19 @@ class Signal(BaseModel):
 
     sig_id: str = Field(..., description="Monotonic id; sha256 of canonical fields")
     strategy_id: str = Field(..., description="e.g. 'bid_ask_imbalance_v1'")
-    instrument_id: Literal["nifty50", "banknifty", "sensex"] = Field(
-        ..., description="Index identifier; must match a vessel"
+    instrument_id: str = Field(
+        ..., min_length=1, description="Instrument identifier; must match a vessel"
     )
     # Legacy alias for backward-compat with order_exec/dispatcher.py and
     # views that read `index`. Deprecated; use `instrument_id`.
-    index: Literal["nifty50", "banknifty", "sensex"] = Field(
-        ..., description="Legacy alias of instrument_id"
-    )
+    index: str = Field(..., min_length=1, description="Legacy alias of instrument_id")
     side: Literal["CE", "PE"]
     strike: int = Field(..., description="Selected strike")
     instrument_token: str = Field(..., description="Broker instrument key, e.g. 'NSE_FO|49520'")
     intent: SignalIntent
-    qty_lots: int = Field(..., gt=0, description="Number of lots; lot_size lives in instrument_config")
+    qty_lots: int = Field(
+        ..., gt=0, description="Number of lots; lot_size lives in instrument_config"
+    )
 
     # New v2 fields
     score: float | None = Field(default=None, description="Quality score 0-10 (Strategy.md §4.8)")
@@ -67,12 +74,12 @@ class Signal(BaseModel):
     )
     decision_ts: int = Field(..., description="ms since epoch when the strategy decided")
 
-    # Legacy premium-diff fields (kept until order_exec is migrated; safe defaults)
-    diff_at_signal: float = Field(default=0.0, description="DEPRECATED — premium-diff legacy")
-    sum_ce_at_signal: float = Field(default=0.0, description="DEPRECATED — premium-diff legacy")
-    sum_pe_at_signal: float = Field(default=0.0, description="DEPRECATED — premium-diff legacy")
-    delta_at_signal: float = Field(default=0.0, description="DEPRECATED — premium-diff legacy")
-    delta_pcr_at_signal: float | None = Field(default=None, description="DEPRECATED")
-    strategy_version: str = Field(default="", description="DEPRECATED — use strategy_id")
+    # Free-form per-strategy metrics at decision time. Each strategy defines
+    # its own metric names (e.g. bid/ask imbalance publishes cum_ce_imbalance,
+    # cum_pe_imbalance, net_pressure). Forensics/attribution only — order-exec
+    # never routes on these.
+    metrics_at_signal: dict[str, float] = Field(
+        default_factory=dict, description="Strategy-defined numeric metrics at decision time"
+    )
 
     ts: datetime = Field(..., description="Emission timestamp (UTC ISO-8601)")

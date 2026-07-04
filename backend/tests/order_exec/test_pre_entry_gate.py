@@ -15,24 +15,23 @@ from state.schemas.signal import Signal
 def _signal(token: str = "NSE_FO|49520", index: str = "nifty50") -> Signal:
     return Signal(
         sig_id="abc123",
+        strategy_id="bid_ask_imbalance_v1",
+        instrument_id=index,
         index=index,
         side="CE",
         strike=23000,
         instrument_token=token,
         intent="FRESH_ENTRY",
         qty_lots=1,
-        diff_at_signal=10.0,
-        sum_ce_at_signal=20.0,
-        sum_pe_at_signal=0.0,
-        delta_at_signal=-20.0,
-        delta_pcr_at_signal=None,
-        strategy_version="t",
+        decision_ts=int(datetime.now(UTC).timestamp() * 1000),
+        metrics_at_signal={"sum_ce": 20.0, "sum_pe": 0.0, "delta": -20.0},
         ts=datetime.now(UTC),
     )
 
 
-def _seed_chain(redis: Any, index: str, token: str, *, ltp: float, bid: float, ask: float,
-                ask_qty: int = 1500) -> None:
+def _seed_chain(
+    redis: Any, index: str, token: str, *, ltp: float, bid: float, ask: float, ask_qty: int = 1500
+) -> None:
     chain = {
         "23000": {
             "ce": {
@@ -52,17 +51,23 @@ def _seed_chain(redis: Any, index: str, token: str, *, ltp: float, bid: float, a
     redis.set(K.market_data_index_option_chain(index), orjson.dumps(chain))
 
 
-def _seed_world(redis: Any, *, trading_active: bool = True, dlc: bool = False,
-                kill_switch: bool = False, engine_up: bool = True) -> None:
+def _seed_world(
+    redis: Any,
+    *,
+    trading_active: bool = True,
+    dlc: bool = False,
+    kill_switch: bool = False,
+    engine_up: bool = True,
+) -> None:
     redis.set(K.SYSTEM_FLAGS_TRADING_ACTIVE, "true" if trading_active else "false")
     redis.set(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED, "true" if dlc else "false")
     redis.set(K.system_flag_engine_up("order_exec"), "true" if engine_up else "false")
     if kill_switch:
         redis.set(
             K.USER_CAPITAL_KILL_SWITCH,
-            orjson.dumps([
-                {"segment": "NSE_FO", "segment_status": "ACTIVE", "kill_switch_enabled": True}
-            ]),
+            orjson.dumps(
+                [{"segment": "NSE_FO", "segment_status": "ACTIVE", "kill_switch_enabled": True}]
+            ),
         )
     else:
         redis.delete(K.USER_CAPITAL_KILL_SWITCH)

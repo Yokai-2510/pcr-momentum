@@ -53,6 +53,17 @@ def _validate_index(index: str) -> None:
         raise ValueError(f"unknown index {index!r}; expected one of {INDEXES}")
 
 
+def _validate_instrument(instrument: str) -> None:
+    """Vessel-scoped keys accept any lowercase instrument id (index or stock
+    symbol) — strategies are not limited to the market-data index set."""
+    if (
+        not instrument
+        or not instrument.replace("_", "").isalnum()
+        or instrument != instrument.lower()
+    ):
+        raise ValueError(f"invalid instrument id {instrument!r}")
+
+
 def _validate_strategy_id(sid: str) -> None:
     if not sid or not sid.replace("_", "").isalnum():
         raise ValueError(f"invalid strategy_id {sid!r}; must be snake_case alnum")
@@ -156,12 +167,12 @@ def market_data_index_spot(index: str) -> str:
 def market_data_index_option_chain(index: str) -> str:
     """Per-strike payload (JSON STRING). New schema (Strategy.md §9.1):
 
-        {strike: {"ce": {token, ltp, bid, ask,
-                          bid_qty_l1..l5, ask_qty_l1..l5,
-                          bid_price_l1..l5, ask_price_l1..l5,
-                          total_bid_qty, total_ask_qty,
-                          vol, oi, ts},
-                  "pe": {...same shape...}}}
+    {strike: {"ce": {token, ltp, bid, ask,
+                      bid_qty_l1..l5, ask_qty_l1..l5,
+                      bid_price_l1..l5, ask_price_l1..l5,
+                      total_bid_qty, total_ask_qty,
+                      vol, oi, ts},
+              "pe": {...same shape...}}}
     """
     _validate_index(index)
     return f"market_data:indexes:{index}:option_chain"
@@ -220,25 +231,16 @@ def strategy_config_instrument(sid: str, index: str) -> str:
 # Per-vessel state (one vessel = (strategy_id, instrument_id) pair)
 # ---------------------------------------------------------------------------
 
+
 def _vessel_prefix(sid: str, index: str) -> str:
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:{sid}:{index}"
 
 
 def vessel_state(sid: str, index: str) -> str:
     """STRING — one of FLAT, IN_CE, IN_PE, COOLDOWN, HALTED."""
     return f"{_vessel_prefix(sid, index)}:state"
-
-
-def vessel_phase(sid: str, index: str) -> str:
-    """STRING — one of BOOT, PRE_OPEN, SETTLE, LIVE, DRAIN."""
-    return f"{_vessel_prefix(sid, index)}:phase"
-
-
-def vessel_phase_entered_ts(sid: str, index: str) -> str:
-    """STRING (ms) — when current phase began."""
-    return f"{_vessel_prefix(sid, index)}:phase_entered_ts"
 
 
 def vessel_enabled(sid: str, index: str) -> str:
@@ -282,6 +284,7 @@ def vessel_counter_wins(sid: str, index: str) -> str:
 # Per-vessel live metrics (Strategy.md §11.1 — written every tick)
 # ---------------------------------------------------------------------------
 
+
 def vessel_metrics_per_strike(sid: str, index: str) -> str:
     """STRING (JSON) — map of {token: {imbalance, spread, wall_state, ...}}."""
     return f"{_vessel_prefix(sid, index)}:metrics:per_strike"
@@ -313,8 +316,6 @@ def vessel_metrics_last_decision_ts(sid: str, index: str) -> str:
 # Signals (shared stream across all vessels — strategy_id is in the payload)
 # ---------------------------------------------------------------------------
 
-STRATEGY_SIGNALS_ACTIVE: Final[str] = "strategy:signals:active"
-STRATEGY_SIGNALS_COUNTER: Final[str] = "strategy:signals:counter"
 STRATEGY_STREAM_SIGNALS: Final[str] = "strategy:stream:signals"
 STRATEGY_STREAM_REJECTED_SIGNALS: Final[str] = "strategy:stream:rejected_signals"
 
@@ -433,7 +434,7 @@ UI_STREAM_HEALTH_ALERTS: Final[str] = "ui:stream:health_alerts"
 def ui_view_vessel(sid: str, index: str) -> str:
     """Per-vessel live display payload (Strategy.md §11.2)."""
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"ui:views:vessels:{sid}:{index}"
 
 
@@ -464,94 +465,8 @@ HEARTBEAT_FIELDS_STATIC: Final[tuple[str, ...]] = (
 def heartbeat_field_vessel(sid: str, index: str) -> str:
     """HASH field name for a vessel heartbeat (under system:health:heartbeats)."""
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:{sid}:{index}"
-
-
-# ===========================================================================
-# Back-compat shims — old per-index strategy keys
-# ---------------------------------------------------------------------------
-# The premium-diff strategy used `strategy:{index}:*` (no strategy_id).
-# Order-exec, api_gateway, background, tests, and views all read/write through
-# these helpers. Rather than refactor 35+ files in one cut, we re-export the
-# old helpers here. They resolve to the new namespace under the active
-# strategy_id (currently `bid_ask_imbalance_v1`).
-#
-# Once each consumer is migrated to be strategy-aware (Phase F.2 onwards),
-# delete the corresponding shim here.
-# ===========================================================================
-
-DEFAULT_STRATEGY_ID: Final[str] = "bid_ask_imbalance_v1"
-
-
-def strategy_enabled(index: str) -> str:
-    return vessel_enabled(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_state(index: str) -> str:
-    return vessel_state(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_basket(index: str) -> str:
-    return vessel_basket(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_pre_open(index: str) -> str:
-    """DEPRECATED — premium-diff baseline, no longer used. Kept as a key for
-    legacy callers that read/write it; safe to ignore the value."""
-    _validate_index(index)
-    return f"strategy:legacy:{index}:pre_open"
-
-
-def strategy_live_sum_ce(index: str) -> str:
-    """DEPRECATED — maps to cum_ce_imbalance metric on the new vessel."""
-    return vessel_metrics_cum_ce(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_live_sum_pe(index: str) -> str:
-    return vessel_metrics_cum_pe(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_live_delta(index: str) -> str:
-    return vessel_metrics_net_pressure(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_live_diffs(index: str) -> str:
-    return vessel_metrics_per_strike(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_live_last_decision_ts(index: str) -> str:
-    return vessel_metrics_last_decision_ts(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_current_position_id(index: str) -> str:
-    return vessel_current_position_id(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_cooldown_until_ts(index: str) -> str:
-    return vessel_cooldown_until_ts(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_cooldown_reason(index: str) -> str:
-    return vessel_cooldown_reason(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_counters_entries_today(index: str) -> str:
-    return vessel_counter_entries(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_counters_reversals_today(index: str) -> str:
-    return vessel_counter_reversals(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_counters_wins_today(index: str) -> str:
-    return vessel_counter_wins(DEFAULT_STRATEGY_ID, index)
-
-
-def strategy_config_index(index: str) -> str:
-    """Old: per-index strategy config. New: per-vessel instrument config
-    under the default strategy."""
-    return strategy_config_instrument(DEFAULT_STRATEGY_ID, index)
 
 
 # ΔPCR keys — DEPRECATED (no longer written, no longer consumed by strategy).
@@ -599,14 +514,7 @@ def orders_positions_open_by_index(index: str) -> str:
     return f"orders:positions:open_by_index:{index}"
 
 
-def orders_pnl_per_index(index: str) -> str:
-    """Old: per-index PnL. Now mapped to per-vessel for the default strategy."""
-    return orders_pnl_per_vessel(DEFAULT_STRATEGY_ID, index)
-
-
 # UI back-compat
-def ui_view_strategy(index: str) -> str:
-    return ui_view_vessel(DEFAULT_STRATEGY_ID, index)
 
 
 def ui_view_delta_pcr(index: str) -> str:

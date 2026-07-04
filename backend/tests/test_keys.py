@@ -30,10 +30,17 @@ class TestStaticConstants:
         assert keys.ORDERS_STREAM_ORDER_EVENTS == "orders:stream:order_events"
 
 
-class TestPerIndexHelpers:
+class TestPerVesselHelpers:
+    SID = "bid_ask_imbalance_v1"
+
     @pytest.mark.parametrize("index", ["nifty50", "banknifty"])
-    def test_strategy_state(self, index: str) -> None:
-        assert keys.strategy_state(index) == f"strategy:{index}:state"
+    def test_vessel_state(self, index: str) -> None:
+        assert keys.vessel_state(self.SID, index) == f"strategy:{self.SID}:{index}:state"
+
+    def test_vessel_keys_accept_stock_instruments(self) -> None:
+        # Vessel namespace is not limited to the market-data index set —
+        # stock-universe strategies address vessels like (sid, "reliance").
+        assert keys.vessel_state(self.SID, "reliance") == (f"strategy:{self.SID}:reliance:state")
 
     @pytest.mark.parametrize("index", ["nifty50", "banknifty"])
     def test_market_data_chain(self, index: str) -> None:
@@ -43,19 +50,19 @@ class TestPerIndexHelpers:
         )
 
     @pytest.mark.parametrize("index", ["nifty50", "banknifty"])
-    def test_delta_pcr_keys(self, index: str) -> None:
-        assert keys.delta_pcr_baseline(index) == f"strategy:{index}:delta_pcr:baseline"
-        assert keys.delta_pcr_cumulative(index) == f"strategy:{index}:delta_pcr:cumulative"
+    def test_delta_pcr_keys_are_legacy_namespaced(self, index: str) -> None:
+        assert keys.delta_pcr_baseline(index) == f"strategy:legacy:{index}:delta_pcr:baseline"
+        assert keys.delta_pcr_cumulative(index) == (f"strategy:legacy:{index}:delta_pcr:cumulative")
 
     @pytest.mark.parametrize("index", ["nifty50", "banknifty"])
     def test_view_keys(self, index: str) -> None:
-        assert keys.ui_view_strategy(index) == f"ui:views:strategy:{index}"
+        assert keys.ui_view_vessel(self.SID, index) == f"ui:views:vessels:{self.SID}:{index}"
         assert keys.ui_view_position(index) == f"ui:views:position:{index}"
-        assert keys.ui_view_delta_pcr(index) == f"ui:views:delta_pcr:{index}"
+        assert keys.ui_view_delta_pcr(index) == f"ui:views:legacy:delta_pcr:{index}"
 
-    def test_invalid_index_rejected(self) -> None:
-        with pytest.raises(ValueError, match="unknown index"):
-            keys.strategy_state("NIFTY50")  # uppercase rejected
+    def test_invalid_instrument_rejected(self) -> None:
+        with pytest.raises(ValueError, match="invalid instrument"):
+            keys.vessel_state(self.SID, "NIFTY50")  # uppercase rejected
         with pytest.raises(ValueError, match="unknown index"):
             keys.market_data_index_meta("sensex")
 
@@ -78,12 +85,12 @@ class TestEnumsAndIndexes:
     def test_index_tuple_complete(self) -> None:
         assert set(keys.INDEXES) == {"nifty50", "banknifty"}
 
-    def test_heartbeat_fields_cover_threads(self) -> None:
-        # Sanity: contains at least one entry per logical thread group.
-        joined = "|".join(keys.HEARTBEAT_FIELDS)
+    def test_heartbeat_fields_cover_engines(self) -> None:
+        # Sanity: contains at least one entry per logical engine.
+        joined = "|".join(keys.HEARTBEAT_FIELDS_STATIC)
         for needle in ("init", "data_pipeline", "order_exec", "scheduler", "health"):
             assert needle in joined
-        # Per-index threads
-        for index in keys.INDEXES:
-            assert f"strategy:{index}" in joined
-            assert f"background:delta_pcr:{index}" in joined
+        # Vessel heartbeats are dynamic HASH fields
+        assert keys.heartbeat_field_vessel("bid_ask_imbalance_v1", "nifty50") == (
+            "strategy:bid_ask_imbalance_v1:nifty50"
+        )

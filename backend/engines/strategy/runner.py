@@ -27,7 +27,9 @@ Loop shape (Strategy.md §2.3 — event-driven, no artificial floor):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -49,8 +51,6 @@ from engines.strategy.strategies.bid_ask_imbalance.buffer import BufferStore
 from engines.strategy.strategies.bid_ask_imbalance.decisions import timing as timing_mod
 from engines.strategy.strategies.bid_ask_imbalance.snapshot import build_snapshot
 from engines.strategy.strategies.bid_ask_imbalance.state import (
-    enter_cooldown,
-    halt,
     is_enabled,
     maybe_exit_cooldown,
     read_state,
@@ -89,7 +89,11 @@ def _read_spot_hash(redis_sync: Any, index: str) -> dict[str, Any]:
         kk = _decode(k)
         vv = _decode(v)
         try:
-            out[kk] = float(vv) if "." in vv or kk in {"ltp", "prev_close", "change_inr", "change_pct"} else int(vv)
+            out[kk] = (
+                float(vv)
+                if "." in vv or kk in {"ltp", "prev_close", "change_inr", "change_pct"}
+                else int(vv)
+            )
         except ValueError:
             out[kk] = vv
     return out
@@ -100,13 +104,16 @@ def _read_meta(redis_sync: Any, index: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _build_token_lookup(meta: dict[str, Any], chain: dict[str, Any]):
+def _build_token_lookup(
+    meta: dict[str, Any], chain: dict[str, Any]
+) -> Callable[[int, str], str | None]:
     """Build a (strike, side) -> token resolver from meta + current chain.
 
     The chain (option_chain) already maps strike -> {ce: {token,...}, pe: {token,...}}.
     Falls back to None when a strike isn't in the chain (which happens before
     data-pipeline subscribes that strike — the runner will retry next tick).
     """
+
     def _lookup(strike: int, side: str) -> str | None:
         sides = chain.get(str(strike))
         if not isinstance(sides, dict):
@@ -114,7 +121,8 @@ def _build_token_lookup(meta: dict[str, Any], chain: dict[str, Any]):
         leaf = sides.get(side.lower())
         if not isinstance(leaf, dict):
             return None
-        return leaf.get("token")
+        token = leaf.get("token")
+        return token if isinstance(token, str) else None
 
     return _lookup
 
@@ -174,8 +182,8 @@ async def _apply_action(
     """Translate Action into state mutations + signal emission."""
     sid = spec.strategy_id
     idx = spec.instrument_id
-    cooldown_sec = int(spec.context.instrument_config.get("post_sl_cooldown_sec", 60))
-    rev_cooldown_sec = int(spec.context.instrument_config.get("post_reversal_cooldown_sec", 90))
+    int(spec.context.instrument_config.get("post_sl_cooldown_sec", 60))
+    int(spec.context.instrument_config.get("post_reversal_cooldown_sec", 90))
     suppress_sec = int(
         (spec.context.strategy_config.get("reversal", {}) or {}).get("suppress_sec", 30)
     )
@@ -187,26 +195,11 @@ async def _apply_action(
     # next tick — sig_id is a deterministic hash so duplicates are collapsed
     # by the allocator's per-vessel cap. This way Redis state never lies
     # about whether a position is actually open.
-    if action.kind == ActionKind.ENTER:
-        await publisher.emit_signal(
-            redis_async,
-            strategy_id=sid,
-            instrument_id=idx,
-            action=action,
-        )
-        # No state write, no counter increment, no memory mutation.
-        # The next-tick state-sync block will reflect order-exec's outcome.
-
-    elif action.kind == ActionKind.FLIP:
-        await publisher.emit_signal(
-            redis_async,
-            strategy_id=sid,
-            instrument_id=idx,
-            action=action,
-        )
-        # State + counters get written by order-exec on confirmed flip fill.
-
-    elif action.kind == ActionKind.EXIT:
+    if (
+        action.kind == ActionKind.ENTER
+        or action.kind == ActionKind.FLIP
+        or action.kind == ActionKind.EXIT
+    ):
         await publisher.emit_signal(
             redis_async,
             strategy_id=sid,
@@ -260,24 +253,22 @@ async def vessel_loop(
 
     dirty = asyncio.Event()
 
-    # ── Phase: BOOT -> PRE_OPEN -> SETTLE -> LIVE ────────────────────────
-    redis_sync.set(K.vessel_phase(sid, idx), "BOOT")
-    redis_sync.set(K.vessel_phase_entered_ts(sid, idx), str(int(time.time() * 1000)))
+    # ── Lifecycle: wait-for-ready -> pre_open -> live ────────────────────
+    # (No phase keys — Step 3 removed strategy:{sid}:{idx}:phase* as dead
+    # schema; lifecycle progress is visible via logs + last_decision_ts.)
 
     # Wait for system ready + enabled flag.
     while not shutdown.is_set():
-        if _decode(redis_sync.get(K.SYSTEM_FLAGS_READY)) == "true" and is_enabled(redis_sync, sid, idx):
+        if _decode(redis_sync.get(K.SYSTEM_FLAGS_READY)) == "true" and is_enabled(
+            redis_sync, sid, idx
+        ):
             break
         await asyncio.sleep(1.0)
 
     if shutdown.is_set():
         return
 
-    redis_sync.set(K.vessel_phase(sid, idx), "PRE_OPEN")
     spec.strategy.on_pre_open(spec.context)
-
-    redis_sync.set(K.vessel_phase(sid, idx), "LIVE")
-    redis_sync.set(K.vessel_phase_entered_ts(sid, idx), str(int(time.time() * 1000)))
 
     # ── Initial basket build ─────────────────────────────────────────────
     last_basket_check_ms = 0
@@ -307,11 +298,19 @@ async def vessel_loop(
         # Update vessel basket key.
         redis_sync.set(
             K.vessel_basket(sid, idx),
-            orjson.dumps({
-                "atm": transition.new_basket.atm,
-                "ce": [transition.new_basket.ce_tokens.get(s) for s in transition.new_basket.ce_strikes],
-                "pe": [transition.new_basket.pe_tokens.get(s) for s in transition.new_basket.pe_strikes],
-            }),
+            orjson.dumps(
+                {
+                    "atm": transition.new_basket.atm,
+                    "ce": [
+                        transition.new_basket.ce_tokens.get(s)
+                        for s in transition.new_basket.ce_strikes
+                    ],
+                    "pe": [
+                        transition.new_basket.pe_tokens.get(s)
+                        for s in transition.new_basket.pe_strikes
+                    ],
+                }
+            ),
         )
         # Update subscriptions
         for tok in transition.added_tokens:
@@ -332,19 +331,17 @@ async def vessel_loop(
     config_reload_at = time.time() + 60.0  # reload config every 60s
     while not shutdown.is_set():
         # Wait for a tick on any of our basket tokens.
-        try:
+        # Idle wakeups (timeout) still run the session-end / cooldown /
+        # config-reload checks below.
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(dirty.wait(), timeout=2.0)
-        except (TimeoutError, asyncio.TimeoutError):
-            # Idle wakeup — still check phase end / cooldown / config reload.
-            pass
         dirty.clear()
 
         # Check session-end (15:30 IST).
         now_ist = datetime.now(_IST)
         hhmm = f"{now_ist.hour:02d}:{now_ist.minute:02d}"
         if hhmm >= "15:30":
-            log.info("vessel: session close reached")
-            redis_sync.set(K.vessel_phase(sid, idx), "DRAIN")
+            log.info("vessel: session close reached — draining")
             spec.strategy.on_drain(spec.context)
             break
 
@@ -378,14 +375,15 @@ async def vessel_loop(
         elif state in ("IN_CE", "IN_PE"):
             target_side = "CE" if state == "IN_CE" else "PE"
             if memory.held_side != target_side or not memory.held_token:
-                pos_id = redis_sync.get(K.strategy_current_position_id(idx))
+                pos_id = redis_sync.get(K.vessel_current_position_id(sid, idx))
                 if isinstance(pos_id, bytes):
                     pos_id = pos_id.decode()
                 if pos_id:
                     pos_hash = redis_sync.hgetall(K.orders_position(pos_id)) or {}
                     pos_decoded = {
-                        (k.decode() if isinstance(k, bytes) else k):
-                        (v.decode() if isinstance(v, bytes) else v)
+                        (k.decode() if isinstance(k, bytes) else k): (
+                            v.decode() if isinstance(v, bytes) else v
+                        )
                         for k, v in pos_hash.items()
                     }
                     memory.held_side = target_side
@@ -437,9 +435,7 @@ async def vessel_loop(
             action = Action(ActionKind.NO_OP, reason=f"strategy_exception:{exc!r}")
 
         # Persist metrics + decision telemetry
-        await _persist_metrics_and_decision(
-            redis_async, sid=sid, instrument_id=idx, action=action
-        )
+        await _persist_metrics_and_decision(redis_async, sid=sid, instrument_id=idx, action=action)
         decision_log.emit(sid, idx, snapshot, action, state=state)
 
         # Apply action (state transition + signal)

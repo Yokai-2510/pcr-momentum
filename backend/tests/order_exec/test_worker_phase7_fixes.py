@@ -32,18 +32,16 @@ from state.schemas.signal import Signal
 def _signal(intent: str = "FRESH_ENTRY") -> Signal:
     return Signal(
         sig_id="abc123",
+        strategy_id="bid_ask_imbalance_v1",
+        instrument_id="nifty50",
         index="nifty50",
         side="CE",
         strike=23000,
         instrument_token="NSE_FO|49520",
         intent=intent,  # type: ignore[arg-type]
         qty_lots=1,
-        diff_at_signal=10.0,
-        sum_ce_at_signal=20.0,
-        sum_pe_at_signal=0.0,
-        delta_at_signal=-20.0,
-        delta_pcr_at_signal=None,
-        strategy_version="t",
+        decision_ts=int(datetime.now(UTC).timestamp() * 1000),
+        metrics_at_signal={"sum_ce": 20.0, "sum_pe": 0.0, "delta": -20.0},
         ts=datetime.now(UTC),
     )
 
@@ -70,39 +68,47 @@ def _seed_world(redis: Any, *, premium: float = 100.0, mode: str = "paper") -> N
     redis.set(K.SYSTEM_FLAGS_TRADING_ACTIVE, "true")
     redis.set(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED, "false")
     redis.set(K.system_flag_engine_up("order_exec"), "true")
-    redis.set(K.STRATEGY_CONFIGS_EXECUTION, orjson.dumps({
-        "spread_skip_pct": 0.05,
-        "buffer_inr": 2.0,
-        "eod_buffer_inr": 5.0,
-        "drift_threshold_inr": 3.0,
-        "chase_ceiling_inr": 15.0,
-        "open_timeout_sec": 8,
-        "partial_grace_sec": 3,
-        "worker_pool_size": 1,
-        "liquidity_exit_suppress_after": "15:00",
-    }))
+    redis.set(
+        K.STRATEGY_CONFIGS_EXECUTION,
+        orjson.dumps(
+            {
+                "spread_skip_pct": 0.05,
+                "buffer_inr": 2.0,
+                "eod_buffer_inr": 5.0,
+                "drift_threshold_inr": 3.0,
+                "chase_ceiling_inr": 15.0,
+                "open_timeout_sec": 8,
+                "partial_grace_sec": 3,
+                "worker_pool_size": 1,
+                "liquidity_exit_suppress_after": "15:00",
+            }
+        ),
+    )
     redis.set(
         K.STRATEGY_CONFIGS_RISK,
-        orjson.dumps({
-            "trading_capital_inr": 200_000.0,
-            "max_concurrent_positions": 2,
-            "daily_loss_circuit_pct": 0.08,
-        }),
+        orjson.dumps(
+            {
+                "trading_capital_inr": 200_000.0,
+                "max_concurrent_positions": 2,
+                "daily_loss_circuit_pct": 0.08,
+            }
+        ),
     )
     redis.set(
-        K.strategy_config_index("nifty50"),
-        orjson.dumps({
-            "index": "nifty50",
-            "lot_size": 75,
-            "sl_pct": 0.20,
-            "target_pct": 0.50,
-            "tsl_arm_pct": 0.15,
-            "tsl_trail_pct": 0.05,
-            "max_hold_sec": 1500,
-        }),
+        K.strategy_config_instrument("bid_ask_imbalance_v1", "nifty50"),
+        orjson.dumps(
+            {
+                "index": "nifty50",
+                "lot_size": 75,
+                "sl_pct": 0.20,
+                "target_pct": 0.50,
+                "tsl_arm_pct": 0.15,
+                "tsl_trail_pct": 0.05,
+                "max_hold_sec": 1500,
+            }
+        ),
     )
     redis.set(K.SYSTEM_FLAGS_MODE, mode)
-    redis.set(K.strategy_pre_open("nifty50"), orjson.dumps({"NSE_FO|49520": {"ltp": 100, "ts": 1}}))
 
 
 @pytest.fixture
@@ -110,8 +116,15 @@ def patched_cleanup_lua(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same stub as test_paper_e2e — fakeredis lacks the project Lua loader."""
     from engines.order_exec import cleanup as cleanup_mod
 
-    def _stub_cleanup(redis_sync: Any, *, pos_id: str, sig_id: str,
-                     order_ids: list[str], index: str) -> int:
+    def _stub_cleanup(
+        redis_sync: Any,
+        *,
+        pos_id: str,
+        sig_id: str,
+        order_ids: list[str],
+        strategy_id: str,
+        index: str,
+    ) -> int:
         pipe = redis_sync.pipeline()
         pipe.delete(K.orders_position(pos_id))
         pipe.delete(K.orders_status(pos_id))
@@ -124,8 +137,7 @@ def patched_cleanup_lua(monkeypatch: pytest.MonkeyPatch) -> None:
         pipe.srem(K.ORDERS_POSITIONS_OPEN, pos_id)
         pipe.srem(K.orders_positions_open_by_index(index), pos_id)
         pipe.sadd(K.ORDERS_POSITIONS_CLOSED_TODAY, pos_id)
-        pipe.delete(K.strategy_current_position_id(index))
-        pipe.srem(K.STRATEGY_SIGNALS_ACTIVE, sig_id)
+        pipe.delete(K.vessel_current_position_id("bid_ask_imbalance_v1", index))
         pipe.execute()
         return 1
 
@@ -215,9 +227,7 @@ def test_bug3_allocator_blocks_when_index_already_open(
     assert entries, "expected rejected signal entry"
     fields = entries[0][1]
     decoded = {
-        (k.decode() if isinstance(k, bytes) else k): (
-            v.decode() if isinstance(v, bytes) else v
-        )
+        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
         for k, v in fields.items()
     }
     assert decoded.get("reason") == "allocator_already_open_on_index"
@@ -234,9 +244,7 @@ def test_bug3_allocator_releases_on_clean_close(
 
     # Allocator slot for nifty50 must be released.
     members = fake_redis_sync.smembers(K.ORDERS_ALLOCATOR_OPEN_SYMBOLS)
-    members_decoded = {
-        (m.decode() if isinstance(m, bytes) else m) for m in members
-    }
+    members_decoded = {(m.decode() if isinstance(m, bytes) else m) for m in members}
     assert "nifty50" not in members_decoded
 
 

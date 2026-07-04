@@ -36,11 +36,9 @@ async def test_apply_writes_canonical_defaults(redis) -> None:
 async def test_per_index_runtime_keys(redis) -> None:
     await redis_template.apply(redis, flush_runtime=False)
     for idx in K.INDEXES:
-        assert (await redis.get(K.strategy_state(idx))) == b"FLAT"
-        assert (await redis.get(K.strategy_enabled(idx))) == b"true"
-        assert (await redis.get(K.strategy_counters_entries_today(idx))) == b"0"
-        assert (await redis.get(K.delta_pcr_cumulative(idx))) == b"1.0"
-        assert (await redis.get(K.delta_pcr_mode(idx))) == b"1"
+        assert (await redis.get(K.vessel_state("bid_ask_imbalance_v1", idx))) == b"FLAT"
+        assert (await redis.get(K.vessel_enabled("bid_ask_imbalance_v1", idx))) == b"true"
+        assert (await redis.get(K.vessel_counter_entries("bid_ask_imbalance_v1", idx))) == b"0"
 
 
 async def test_flush_preserves_user_and_strategy_configs(redis) -> None:
@@ -66,9 +64,9 @@ async def test_flush_preserves_user_and_strategy_configs(redis) -> None:
 
 async def test_apply_with_flush_resets_runtime(redis) -> None:
     await redis.set(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED, "true")
-    await redis.set(K.strategy_state("nifty50"), "IN_PE")
+    await redis.set(K.vessel_state("bid_ask_imbalance_v1", "nifty50"), "IN_PE")
     out = await redis_template.apply(redis, flush_runtime=True)
     assert out["deleted"] >= 1
     # After flush + apply, runtime is at canonical defaults
     assert (await redis.get(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED)) == b"false"
-    assert (await redis.get(K.strategy_state("nifty50"))) == b"FLAT"
+    assert (await redis.get(K.vessel_state("bid_ask_imbalance_v1", "nifty50"))) == b"FLAT"

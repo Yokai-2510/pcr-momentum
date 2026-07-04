@@ -27,7 +27,8 @@ from state.keys import (
     STRATEGY_CONFIGS_EXECUTION,
     STRATEGY_CONFIGS_RISK,
     STRATEGY_CONFIGS_SESSION,
-    strategy_config_index,
+    strategy_config,
+    strategy_config_instrument,
 )
 
 
@@ -84,14 +85,15 @@ def reset_settings_cache() -> None:
 # Runtime config (Postgres -> dict)
 # ---------------------------------------------------------------------------
 
-# Mapping `config_settings.key` -> Redis key it mirrors into.
+# Mapping `config_settings.key` -> Redis key it mirrors into (static sections).
+# Dynamic per-strategy sections are resolved by `redis_key_for_config`:
+#   "strategy:{sid}"            -> strategy:configs:strategies:{sid}
+#   "instrument:{sid}:{idx}"    -> strategy:configs:strategies:{sid}:instruments:{idx}
 # Aligns with Schema.md §1.4 (strategy:configs:*).
 RUNTIME_CONFIG_REDIS_MAP: dict[str, str] = {
     "execution": STRATEGY_CONFIGS_EXECUTION,
     "session": STRATEGY_CONFIGS_SESSION,
     "risk": STRATEGY_CONFIGS_RISK,
-    "index:nifty50": strategy_config_index("nifty50"),
-    "index:banknifty": strategy_config_index("banknifty"),
 }
 
 
@@ -126,12 +128,22 @@ async def load_runtime_configs(
 
 
 def redis_key_for_config(config_key: str) -> str:
-    """Return the Redis key that mirrors `config_settings.key`.
+    """Resolve a config section name to the Redis key it mirrors into.
 
-    Raises `KeyError` if `config_key` is not in the canonical mapping.
+    Static sections come from RUNTIME_CONFIG_REDIS_MAP; per-strategy sections
+    are dynamic. Raises KeyError on unknown shapes (callers skip-and-warn).
     """
-    if config_key not in RUNTIME_CONFIG_REDIS_MAP:
-        raise KeyError(
-            f"unknown config key {config_key!r}; expected one of {sorted(RUNTIME_CONFIG_REDIS_MAP)}"
-        )
-    return RUNTIME_CONFIG_REDIS_MAP[config_key]
+    if config_key in RUNTIME_CONFIG_REDIS_MAP:
+        return RUNTIME_CONFIG_REDIS_MAP[config_key]
+    if config_key.startswith("strategy:"):
+        sid = config_key.partition(":")[2]
+        if sid:
+            return strategy_config(sid)
+    if config_key.startswith("instrument:"):
+        parts = config_key.split(":", 2)
+        if len(parts) == 3 and parts[1] and parts[2]:
+            return strategy_config_instrument(parts[1], parts[2])
+    raise KeyError(
+        f"unknown config key {config_key!r}; expected one of "
+        f"{sorted(RUNTIME_CONFIG_REDIS_MAP)} or 'strategy:{{sid}}' / 'instrument:{{sid}}:{{instrument}}'"
+    )

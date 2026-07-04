@@ -18,7 +18,7 @@ This module just provides typed helpers + Redis I/O for state mutations.
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from state import keys as K
 
@@ -31,7 +31,7 @@ def read_state(redis_sync: Any, sid: str, index: str) -> VesselState:
     if isinstance(raw, bytes):
         raw = raw.decode()
     if raw in _VALID_STATES:
-        return raw  # type: ignore[return-value]
+        return cast(VesselState, raw)
     return "FLAT"
 
 
@@ -41,9 +41,7 @@ def set_state(redis_sync: Any, sid: str, index: str, new_state: VesselState) -> 
     redis_sync.set(K.vessel_state(sid, index), new_state)
 
 
-def enter_cooldown(
-    redis_sync: Any, sid: str, index: str, reason: str, duration_sec: int
-) -> None:
+def enter_cooldown(redis_sync: Any, sid: str, index: str, reason: str, duration_sec: int) -> None:
     until_ms = int(time.time() * 1000) + duration_sec * 1000
     pipe = redis_sync.pipeline(transaction=False)
     pipe.set(K.vessel_state(sid, index), "COOLDOWN")

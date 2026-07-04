@@ -46,11 +46,7 @@ async def poll_loop(
         # token blob may be plain string or {"token": "..."} JSON
         token = ""
         try:
-            blob = (
-                token_payload.decode()
-                if isinstance(token_payload, bytes)
-                else token_payload
-            )
+            blob = token_payload.decode() if isinstance(token_payload, bytes) else token_payload
             if blob.startswith("{"):
                 parsed = orjson.loads(blob)
                 token = parsed.get("token", "") if isinstance(parsed, dict) else ""

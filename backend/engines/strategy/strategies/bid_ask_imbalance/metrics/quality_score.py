@@ -42,7 +42,7 @@ class QualityResult:
 
 def compute_quality_score(
     *,
-    side: str,                       # "CE" | "PE"
+    side: str,  # "CE" | "PE"
     dominant_leg: StrikeLeg,
     buffer: StrikeBuffer,
     spread_good_inr: float,
@@ -75,7 +75,9 @@ def compute_quality_score(
     if imb is not None:
         if side == "CE" and imb > imbalance_strong_buy:
             breakdown["imbalance"] = 2
-        elif side == "PE" and imb < (1.0 / imbalance_strong_buy if imbalance_strong_buy > 0 else 0.7):
+        elif side == "PE" and imb < (
+            1.0 / imbalance_strong_buy if imbalance_strong_buy > 0 else 0.7
+        ):
             # Symmetric on PE — strong sellers in CE = strong buyers in PE proxy.
             # The PE leg's own imbalance (>1.3 means PE buyers loading) is a
             # better signal — use that instead.

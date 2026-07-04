@@ -2,11 +2,12 @@
 Signal publisher — write Action -> Signal -> XADD strategy:stream:signals.
 
 Decouples the runner (which builds Actions) from Redis emission (which
-involves payload schema, ULID, dedup, counter increment, etc.).
+involves payload schema, sig_id minting, and dedup).
 
-Signal schema v2 (Strategy.md §9.4) carries:
+Signal schema v3 (Strategy.md §9.4, Step 3 trim) carries:
     sig_id, strategy_id, instrument_id, intent, side, strike, instrument_token,
-    qty_lots, score, score_breakdown, net_pressure_at_signal, decision_ts
+    qty_lots, score, score_breakdown, net_pressure_at_signal, decision_ts,
+    metrics_at_signal (free-form numeric blob — the strategy's Action.metrics)
 """
 
 from __future__ import annotations
@@ -77,14 +78,9 @@ async def emit_signal(
         net_pressure_at_signal=metrics.get("net_pressure"),
         decision_ts=ts_ms,
         ts=ts,
-        # Legacy premium-diff fields, kept zero for backward compat with the
-        # current dispatcher schema. They will be removed in Phase F cleanup.
-        diff_at_signal=0.0,
-        sum_ce_at_signal=metrics.get("cum_ce_imbalance") or 0.0,
-        sum_pe_at_signal=metrics.get("cum_pe_imbalance") or 0.0,
-        delta_at_signal=metrics.get("net_pressure") or 0.0,
-        delta_pcr_at_signal=None,
-        strategy_version=strategy_id,
+        # Free-form forensic metrics — whatever numeric values the strategy
+        # put on its Action. Strategy-defined names; no central schema.
+        metrics_at_signal={k: float(v) for k, v in metrics.items() if isinstance(v, int | float)},
     )
     payload = sig.model_dump(mode="json")
     payload_json = orjson.dumps(payload)
@@ -104,16 +100,12 @@ async def emit_signal(
         else:
             stream_fields[key] = orjson.dumps(value).decode()
 
-    pipe = redis_async.pipeline(transaction=False)
-    pipe.sadd(K.STRATEGY_SIGNALS_ACTIVE, sig_id)
-    pipe.xadd(
+    await redis_async.xadd(
         K.STRATEGY_STREAM_SIGNALS,
         cast(Any, stream_fields),
         maxlen=5_000,
         approximate=True,
     )
-    pipe.incr(K.STRATEGY_SIGNALS_COUNTER)
-    await pipe.execute()
 
     log.info(
         f"emit {intent.value} {action.side} strike={action.strike} qty={action.qty_lots} "

@@ -99,7 +99,9 @@ async def positions_history(
     where = " AND ".join(conditions)
     offset = (page - 1) * page_size
     async with pool.acquire() as conn:
-        total = await conn.fetchval(f"SELECT count(*) FROM trades_closed_positions WHERE {where}", *args)
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM trades_closed_positions WHERE {where}", *args
+        )
         rows = await conn.fetch(
             f"""
             SELECT * FROM trades_closed_positions

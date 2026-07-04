@@ -90,7 +90,7 @@ async def _amain(strategy_id_filter: str | None) -> int:
     router = TickRouter()
     vessel_keys = [(s.strategy_id, s.instrument_id) for s in specs]
 
-    tasks: list[asyncio.Task] = []
+    tasks: list[asyncio.Task[Any]] = []
 
     # Tick router (subscriber).
     tasks.append(
@@ -141,7 +141,7 @@ async def _amain(strategy_id_filter: str | None) -> int:
     # Wait for shutdown OR any task to exit.
     try:
         done, _pending = await asyncio.wait(
-            tasks + [asyncio.create_task(shutdown.wait(), name="shutdown_waiter")],
+            [*tasks, asyncio.create_task(shutdown.wait(), name="shutdown_waiter")],
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in done:

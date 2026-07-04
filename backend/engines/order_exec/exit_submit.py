@@ -58,9 +58,7 @@ def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _read_leaf(
-    redis_sync: _redis_sync.Redis, index: str, token: str
-) -> dict[str, Any] | None:
+def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
     raw = redis_sync.get(K.market_data_index_option_chain(index))
     if not raw:
         return None
@@ -130,9 +128,7 @@ def submit_and_complete_paper(
             "broker_status": "paper_filled",
         },
     ]
-    log.info(
-        f"exit[paper:{exit_reason}]: filled {position.qty} @ ₹{fill_price} (bid={bid:.2f})"
-    )
+    log.info(f"exit[paper:{exit_reason}]: filled {position.qty} @ ₹{fill_price} (bid={bid:.2f})")
     return ExitResult(
         filled_qty=int(position.qty),
         avg_fill_price=fill_price,
@@ -162,18 +158,20 @@ def submit_and_complete_live(
 
     submit_ts = _now_ts_ms()
     submit_price = round(max(0.05, bid - buffer_inr), 2)
-    res = UpstoxAPI.place_order({
-        "instrument_token": position.instrument_token,
-        "quantity": int(position.qty),
-        "transaction_type": "SELL",
-        "access_token": access_token,
-        "price": submit_price,
-        "order_type": "LIMIT",
-        "product": "I",
-        "validity": "DAY",
-        "tag": position.pos_id,
-        "slice": True,
-    })
+    res = UpstoxAPI.place_order(
+        {
+            "instrument_token": position.instrument_token,
+            "quantity": int(position.qty),
+            "transaction_type": "SELL",
+            "access_token": access_token,
+            "price": submit_price,
+            "order_type": "LIMIT",
+            "product": "I",
+            "validity": "DAY",
+            "tag": position.pos_id,
+            "slice": True,
+        }
+    )
     if not res["success"]:
         # Cannot abandon — refresh and retry place.
         log.warning(f"exit[live]: place rejected, retrying: {res['error']}")
@@ -209,19 +207,23 @@ def submit_and_complete_live(
                 cur_bid = float(cur_leaf.get("bid") or 0)
                 if cur_bid > 0 and abs(cur_bid - bid) >= 1.0:
                     new_price = round(max(0.05, cur_bid - buffer_inr), 2)
-                    UpstoxAPI.modify_order({
-                        "order_id": order_id,
-                        "access_token": access_token,
-                        "price": new_price,
-                    })
+                    UpstoxAPI.modify_order(
+                        {
+                            "order_id": order_id,
+                            "access_token": access_token,
+                            "price": new_price,
+                        }
+                    )
                     bid = cur_bid
                     submit_price = new_price
-                    events.append({
-                        "ts": datetime.now(UTC).isoformat(),
-                        "event_type": "MODIFY",
-                        "order_id": order_id,
-                        "price": new_price,
-                    })
+                    events.append(
+                        {
+                            "ts": datetime.now(UTC).isoformat(),
+                            "event_type": "MODIFY",
+                            "order_id": order_id,
+                            "price": new_price,
+                        }
+                    )
             continue
 
         for _stream, entries in resp:
@@ -247,17 +249,19 @@ def submit_and_complete_live(
                     cur_leaf = _read_leaf(redis_sync, position.index, position.instrument_token)
                     cur_bid = float((cur_leaf or {}).get("bid") or bid)
                     submit_price = round(max(0.05, cur_bid - buffer_inr), 2)
-                    res = UpstoxAPI.place_order({
-                        "instrument_token": position.instrument_token,
-                        "quantity": int(position.qty),
-                        "transaction_type": "SELL",
-                        "access_token": access_token,
-                        "price": submit_price,
-                        "order_type": "LIMIT",
-                        "product": "I",
-                        "validity": "DAY",
-                        "tag": position.pos_id,
-                    })
+                    res = UpstoxAPI.place_order(
+                        {
+                            "instrument_token": position.instrument_token,
+                            "quantity": int(position.qty),
+                            "transaction_type": "SELL",
+                            "access_token": access_token,
+                            "price": submit_price,
+                            "order_type": "LIMIT",
+                            "product": "I",
+                            "validity": "DAY",
+                            "tag": position.pos_id,
+                        }
+                    )
                     if res["success"]:
                         order_id = (res["data"] or {}).get("first_order_id") or order_id
 

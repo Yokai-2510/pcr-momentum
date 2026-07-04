@@ -23,6 +23,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import defaultdict
 
 import redis.asyncio as _redis_async
@@ -59,7 +60,7 @@ class TickRouter:
             del self._routes[token]
 
     def desired_channels(self) -> set[str]:
-        return {K.market_data_pub_tick(t) for t in self._routes.keys()}
+        return {K.market_data_pub_tick(t) for t in self._routes}
 
     async def _reconcile_subscriptions(self) -> None:
         """Sync our subscription set to the desired set (additive only here;
@@ -74,10 +75,8 @@ class TickRouter:
                 await self._pubsub.subscribe(ch)
                 self._subscribed.add(ch)
             for ch in to_drop:
-                try:
+                with contextlib.suppress(Exception):
                     await self._pubsub.unsubscribe(ch)
-                except Exception:
-                    pass
                 self._subscribed.discard(ch)
 
     async def reconcile(self) -> None:
@@ -109,7 +108,7 @@ class TickRouter:
                         self._pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
                         timeout=1.5,
                     )
-                except (TimeoutError, asyncio.TimeoutError):
+                except TimeoutError:
                     await self._reconcile_subscriptions()
                     continue
                 except Exception as exc:
@@ -123,14 +122,14 @@ class TickRouter:
                     channel = channel.decode()
                 if not channel or not channel.startswith("market_data:pub:tick:"):
                     continue
-                token = channel[len("market_data:pub:tick:"):]
+                token = channel[len("market_data:pub:tick:") :]
                 events = self._routes.get(token, ())
                 for ev in events:
                     ev.set()
         finally:
             try:
                 if self._pubsub is not None:
-                    await self._pubsub.aclose()
+                    await self._pubsub.aclose()  # type: ignore[no-untyped-call]
             except Exception:
                 pass
             log.info("tick_router: shutdown")

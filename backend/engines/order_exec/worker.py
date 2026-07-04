@@ -100,14 +100,14 @@ def _read_json(redis_sync: _redis_sync.Redis, key: str) -> Any:
     return orjson.loads(blob)
 
 
-def _read_index_config(redis_sync: _redis_sync.Redis, index: str) -> dict[str, Any]:
-    parsed = _read_json(redis_sync, K.strategy_config_index(index))
+def _read_instrument_config(
+    redis_sync: _redis_sync.Redis, strategy_id: str, index: str
+) -> dict[str, Any]:
+    parsed = _read_json(redis_sync, K.strategy_config_instrument(strategy_id, index))
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _read_leaf(
-    redis_sync: _redis_sync.Redis, index: str, token: str
-) -> dict[str, Any] | None:
+def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
     chain = _read_json(redis_sync, K.market_data_index_option_chain(index))
     if not isinstance(chain, dict):
         return None
@@ -133,8 +133,9 @@ def _read_access_token(redis_sync: _redis_sync.Redis) -> str:
     return _decode(payload)
 
 
-def _persist_status(redis_sync: _redis_sync.Redis, pos_id: str, stage: PositionStage,
-                    note: str = "") -> None:
+def _persist_status(
+    redis_sync: _redis_sync.Redis, pos_id: str, stage: PositionStage, note: str = ""
+) -> None:
     redis_sync.hset(
         K.orders_status(pos_id),
         mapping={
@@ -169,9 +170,7 @@ def _refresh_position_hash(
     try:
         redis_sync.hset(K.orders_position(position.pos_id), mapping=mapping)
     except Exception as e:  # pragma: no cover — best-effort observability
-        logger.bind(pos_id=position.pos_id).warning(
-            f"_refresh_position_hash failed: {e!r}"
-        )
+        logger.bind(pos_id=position.pos_id).warning(f"_refresh_position_hash failed: {e!r}")
 
 
 def _build_market_snapshot(
@@ -184,20 +183,21 @@ def _build_market_snapshot(
             spot = float(_decode(spot_hash.get(b"ltp") or spot_hash.get("ltp") or 0))
         except (TypeError, ValueError):
             spot = 0.0
+    # Forensic sums come from the strategy's free-form metrics blob; absent
+    # keys default to 0.0 (not every strategy publishes CE/PE-sum semantics).
+    metrics = signal.metrics_at_signal
     return MarketSnapshot(
         ts=datetime.now(UTC),
         spot=spot,
-        sum_ce=float(signal.sum_ce_at_signal),
-        sum_pe=float(signal.sum_pe_at_signal),
-        delta=float(signal.delta_at_signal),
-        delta_pcr_cumulative=signal.delta_pcr_at_signal,
+        sum_ce=float(metrics.get("sum_ce", metrics.get("cum_ce_imbalance", 0.0))),
+        sum_pe=float(metrics.get("sum_pe", metrics.get("cum_pe_imbalance", 0.0))),
+        delta=float(metrics.get("delta", metrics.get("net_pressure", 0.0))),
+        delta_pcr_cumulative=metrics.get("delta_pcr"),
         per_strike={},
     )
 
 
-def _record_rejected_signal(
-    redis_sync: _redis_sync.Redis, signal: Signal, reason: str
-) -> None:
+def _record_rejected_signal(redis_sync: _redis_sync.Redis, signal: Signal, reason: str) -> None:
     redis_sync.xadd(
         K.STRATEGY_STREAM_REJECTED_SIGNALS,
         {"sig_id": signal.sig_id, "index": signal.index, "reason": reason},
@@ -222,14 +222,10 @@ def _buffer_report_for_persistence(
         )
         redis_sync.ltrim(K.ORDERS_REPORTS_PENDING, -10_000, -1)
     except Exception as e:  # pragma: no cover
-        logger.bind(engine="order_exec").exception(
-            f"buffer_report rpush failed: {e!r}"
-        )
+        logger.bind(engine="order_exec").exception(f"buffer_report rpush failed: {e!r}")
 
 
-def _load_position_from_hash(
-    redis_sync: _redis_sync.Redis, pos_id: str
-) -> Position | None:
+def _load_position_from_hash(redis_sync: _redis_sync.Redis, pos_id: str) -> Position | None:
     """Re-hydrate a Position from `orders:positions:{pos_id}` HASH.
 
     Used by the REVERSAL_FLIP path (Bug-2 fix) to look up the prior leg's
@@ -239,9 +235,7 @@ def _load_position_from_hash(
     if not raw:
         return None
     decoded = {
-        (k.decode() if isinstance(k, bytes) else k): (
-            v.decode() if isinstance(v, bytes) else v
-        )
+        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
         for k, v in raw.items()
     }
     typed: dict[str, Any] = {}
@@ -294,14 +288,13 @@ def _load_position_from_hash(
     try:
         return Position.model_validate(typed)
     except Exception as e:
-        logger.bind(pos_id=pos_id).warning(
-            f"_load_position_from_hash: validation failed: {e!r}"
-        )
+        logger.bind(pos_id=pos_id).warning(f"_load_position_from_hash: validation failed: {e!r}")
         return None
 
 
 def _close_existing_position_for_flip(
     redis_sync: _redis_sync.Redis,
+    strategy_id: str,
     index: str,
     *,
     mode: str,
@@ -317,7 +310,7 @@ def _close_existing_position_for_flip(
     Returns False when we found a current position but couldn't load /
     close it — the caller must abort the new entry to avoid double-open.
     """
-    cur_pos_id = _decode(redis_sync.get(K.strategy_current_position_id(index)))
+    cur_pos_id = _decode(redis_sync.get(K.vessel_current_position_id(strategy_id, index)))
     if not cur_pos_id:
         return True
 
@@ -330,12 +323,17 @@ def _close_existing_position_for_flip(
         )
         return False
 
-    _persist_status(redis_sync, cur_pos_id, PositionStage.EXIT_SUBMITTING,
-                    ExitReason.REVERSAL_FLIP.value)
+    _persist_status(
+        redis_sync, cur_pos_id, PositionStage.EXIT_SUBMITTING, ExitReason.REVERSAL_FLIP.value
+    )
     try:
         exit_result = exit_submit.submit_and_complete(
-            redis_sync, prior, ExitReason.REVERSAL_FLIP.value,
-            mode=mode, access_token=access_token, now_hhmm=_now_hhmm(),
+            redis_sync,
+            prior,
+            ExitReason.REVERSAL_FLIP.value,
+            mode=mode,
+            access_token=access_token,
+            now_hhmm=_now_hhmm(),
         )
     except Exception as e:
         log.exception(f"REVERSAL_FLIP exit_submit failed for {cur_pos_id}: {e!r}")
@@ -347,6 +345,7 @@ def _close_existing_position_for_flip(
     # the persisted Position. Charges & latencies will be zero/best-effort;
     # the gross PnL computation is still correct.
     from engines.order_exec.entry import EntryResult as _EntryResult
+
     entry_result = _EntryResult(
         filled_qty=int(prior.qty),
         avg_fill_price=float(prior.entry_price),
@@ -389,6 +388,7 @@ def _close_existing_position_for_flip(
             pos_id=cur_pos_id,
             sig_id=prior.sig_id,
             order_ids=[prior.entry_order_id, exit_result.order_id],
+            strategy_id=strategy_id,
             index=index,
         )
     except Exception as e:
@@ -399,9 +399,7 @@ def _close_existing_position_for_flip(
     # as the canonical released figure since worst-case ask is no longer
     # observable here).
     released_premium = float(prior.entry_price) * float(prior.qty)
-    allocator.release(
-        redis_sync, index=index, premium_to_release_inr=released_premium
-    )
+    allocator.release(redis_sync, index=index, premium_to_release_inr=released_premium)
 
     _persist_status(redis_sync, cur_pos_id, PositionStage.DONE)
     log.info(f"REVERSAL_FLIP: prior position {cur_pos_id} closed")
@@ -429,13 +427,15 @@ def process_signal(
     access_token = _read_access_token(redis_sync) if mode == "live" else ""
 
     # ── REVERSAL_FLIP pre-step ──────────────────────────────────────────
-    intent_value = (
-        signal.intent.value if hasattr(signal.intent, "value") else str(signal.intent)
-    )
+    intent_value = signal.intent.value if hasattr(signal.intent, "value") else str(signal.intent)
     if intent_value == "REVERSAL_FLIP":
         ok_flip = _close_existing_position_for_flip(
-            redis_sync, signal.index,
-            mode=mode, access_token=access_token, log=log,
+            redis_sync,
+            signal.strategy_id,
+            signal.index,
+            mode=mode,
+            access_token=access_token,
+            log=log,
         )
         if not ok_flip:
             _record_rejected_signal(redis_sync, signal, "reversal_close_failed")
@@ -452,7 +452,7 @@ def process_signal(
 
     # From here on, any abort path MUST release the allocator reservation.
 
-    cfg_idx = _read_index_config(redis_sync, signal.index)
+    cfg_idx = _read_instrument_config(redis_sync, signal.strategy_id, signal.index)
     lot_size = int(cfg_idx.get("lot_size") or 1)
     sl_pct = float(cfg_idx.get("sl_pct") or 0.20)
     target_pct = float(cfg_idx.get("target_pct") or 0.50)
@@ -461,22 +461,32 @@ def process_signal(
     max_hold_sec = int(cfg_idx.get("max_hold_sec") or 1500)
 
     market_snapshot_entry = _build_market_snapshot(redis_sync, signal.index, signal)
-    pre_open_snapshot = _read_json(redis_sync, K.strategy_pre_open(signal.index)) or {}
+    # Pre-open snapshots were a premium-diff concept with no current writer;
+    # strategies that need one carry it in Signal.metrics_at_signal instead.
+    pre_open_snapshot: dict[str, Any] = {}
     signal_snapshot = signal.model_dump(mode="json")
 
     # ── STAGE B + C: entry ──────────────────────────────────────────────
     _persist_status(redis_sync, pos_id, PositionStage.ENTRY_SUBMITTING)
     entry_result = entry_mod.submit_and_monitor(
-        redis_sync, signal, pos_id,
-        mode=mode, access_token=access_token, lot_size=lot_size,
+        redis_sync,
+        signal,
+        pos_id,
+        mode=mode,
+        access_token=access_token,
+        lot_size=lot_size,
     )
     if entry_result.abandon_reason or entry_result.filled_qty <= 0:
         log.warning(f"entry abandoned: {entry_result.abandon_reason}")
-        _persist_status(redis_sync, pos_id, PositionStage.ABORTED, entry_result.abandon_reason or "no_fill")
+        _persist_status(
+            redis_sync, pos_id, PositionStage.ABORTED, entry_result.abandon_reason or "no_fill"
+        )
         _record_rejected_signal(redis_sync, signal, entry_result.abandon_reason or "no_fill")
         # Release the reservation we held for this attempt.
         allocator.release(
-            redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
+            redis_sync,
+            index=signal.index,
+            premium_to_release_inr=premium_reserved,
         )
         return
 
@@ -520,10 +530,18 @@ def process_signal(
             tsl_trail_pct=tsl_trail_pct,
             max_hold_sec=max_hold_sec,
         ),
-        sum_ce_at_entry=float(signal.sum_ce_at_signal),
-        sum_pe_at_entry=float(signal.sum_pe_at_signal),
-        delta_pcr_at_entry=signal.delta_pcr_at_signal,
-        strategy_version=signal.strategy_version,
+        sum_ce_at_entry=float(
+            signal.metrics_at_signal.get(
+                "sum_ce", signal.metrics_at_signal.get("cum_ce_imbalance", 0.0)
+            )
+        ),
+        sum_pe_at_entry=float(
+            signal.metrics_at_signal.get(
+                "sum_pe", signal.metrics_at_signal.get("cum_pe_imbalance", 0.0)
+            )
+        ),
+        delta_pcr_at_entry=signal.metrics_at_signal.get("delta_pcr"),
+        strategy_version=signal.strategy_id,
     )
 
     # Vessel-side state transition on confirmed entry fill. Order-exec is the
@@ -534,17 +552,19 @@ def process_signal(
     pipe = redis_sync.pipeline()
     pipe.hset(
         K.orders_position(pos_id),
-        mapping={k: _serialize_position_field(v)
-                 for k, v in position.model_dump(mode="json").items()
-                 if v is not None},
+        mapping={
+            k: _serialize_position_field(v)
+            for k, v in position.model_dump(mode="json").items()
+            if v is not None
+        },
     )
     pipe.sadd(K.ORDERS_POSITIONS_OPEN, pos_id)
     pipe.sadd(K.orders_positions_open_by_index(signal.index), pos_id)
-    pipe.set(K.strategy_current_position_id(signal.index), pos_id)
-    pipe.set(K.strategy_state(signal.index), new_state)
+    pipe.set(K.vessel_current_position_id(signal.strategy_id, signal.index), pos_id)
+    pipe.set(K.vessel_state(signal.strategy_id, signal.index), new_state)
     if signal.intent == "REVERSAL_FLIP":
-        pipe.incr(K.strategy_counters_reversals_today(signal.index))
-    pipe.incr(K.strategy_counters_entries_today(signal.index))
+        pipe.incr(K.vessel_counter_reversals(signal.strategy_id, signal.index))
+    pipe.incr(K.vessel_counter_entries(signal.strategy_id, signal.index))
     pipe.execute()
 
     # ── STAGE D: exit eval loop ─────────────────────────────────────────
@@ -576,19 +596,23 @@ def process_signal(
             0,
             (_now_ts_ms() - int(position.entry_ts.timestamp() * 1000)) // 1000,
         )
-        position = position.model_copy(update={
-            "pnl": pnl_inr,
-            "pnl_pct": pnl_pct,
-            "holding_seconds": int(holding_seconds),
-        })
+        position = position.model_copy(
+            update={
+                "pnl": pnl_inr,
+                "pnl_pct": pnl_pct,
+                "holding_seconds": int(holding_seconds),
+            }
+        )
         _refresh_position_hash(redis_sync, position, _HASH_REFRESH_FIELDS)
 
         if position.tsl_armed:
-            trailing_history.append({
-                "ts_ms": _now_ts_ms(),
-                "peak": position.peak_premium,
-                "tsl_level": position.tsl_level,
-            })
+            trailing_history.append(
+                {
+                    "ts_ms": _now_ts_ms(),
+                    "peak": position.peak_premium,
+                    "tsl_level": position.tsl_level,
+                }
+            )
 
         # Read the strategy-emitted exit-pull flag (Strategy.md §5.3 — exit
         # decisions emitted by the vessel land here as a per-position flag
@@ -607,12 +631,14 @@ def process_signal(
             daily_loss_circuit_triggered=daily_loss,
             strategy_exit_pull=strategy_pull,
         )
-        exit_eval_history.append({
-            "ts_ms": _now_ts_ms(),
-            "premium": cur_premium,
-            "should_exit": should_exit,
-            "reason": reason_enum.value if reason_enum else None,
-        })
+        exit_eval_history.append(
+            {
+                "ts_ms": _now_ts_ms(),
+                "premium": cur_premium,
+                "should_exit": should_exit,
+                "reason": reason_enum.value if reason_enum else None,
+            }
+        )
         if should_exit:
             exit_reason_resolved = reason_enum
             decision_ts_ms = _now_ts_ms()
@@ -624,8 +650,12 @@ def process_signal(
     # ── STAGE E: exit submit ────────────────────────────────────────────
     _persist_status(redis_sync, pos_id, PositionStage.EXIT_SUBMITTING, exit_reason_resolved.value)
     exit_result = exit_submit.submit_and_complete(
-        redis_sync, position, exit_reason_resolved.value,
-        mode=mode, access_token=access_token, now_hhmm=_now_hhmm(),
+        redis_sync,
+        position,
+        exit_reason_resolved.value,
+        mode=mode,
+        access_token=access_token,
+        now_hhmm=_now_hhmm(),
     )
     exit_result.decision_to_exit_submit_ms = max(0, _now_ts_ms() - decision_ts_ms)
     _persist_status(redis_sync, pos_id, PositionStage.EXIT_FILLED)
@@ -657,6 +687,7 @@ def process_signal(
             pos_id=pos_id,
             sig_id=signal.sig_id,
             order_ids=order_ids,
+            strategy_id=signal.strategy_id,
             index=signal.index,
         )
     except Exception as e:
@@ -664,19 +695,23 @@ def process_signal(
 
     # Release the allocator slot now that the position is closed.
     allocator.release(
-        redis_sync, index=signal.index, premium_to_release_inr=premium_reserved,
+        redis_sync,
+        index=signal.index,
+        premium_to_release_inr=premium_reserved,
     )
     # Clear any strategy exit-pull flag now that we've acted on it.
     redis_sync.delete(K.orders_exit_pull(pos_id))
 
     # Vessel-side state transition on confirmed exit fill. Order-exec is the
     # sole authoritative writer of vessel:state and cooldown_*. Strategy.md §5.5.
-    sid = signal.strategy_id or K.DEFAULT_STRATEGY_ID
+    sid = signal.strategy_id
     raw_instr = redis_sync.get(K.strategy_config_instrument(sid, signal.index))
     instr_cfg: dict[str, Any] = {}
     if raw_instr:
         try:
-            instr_cfg = orjson.loads(raw_instr if isinstance(raw_instr, bytes) else raw_instr.encode())
+            instr_cfg = orjson.loads(
+                raw_instr if isinstance(raw_instr, bytes) else raw_instr.encode()
+            )
         except Exception:
             instr_cfg = {}
     sl_cooldown = int(instr_cfg.get("post_sl_cooldown_sec", 60))
@@ -687,25 +722,28 @@ def process_signal(
     # cooldown, vessel goes straight to FLAT. Centralizes the rule so adding
     # a new ExitReason only requires one row here.
     cooldown_by_reason: dict[str, tuple[int, str]] = {
-        "HARD_SL":         (sl_cooldown,             "post_sl"),
-        "TRAILING_SL":     (sl_cooldown,             "post_tsl"),
-        "REVERSAL_FLIP":   (flip_cooldown,           "post_flip"),
-        "STRATEGY_EXIT":   (strategy_exit_cooldown,  "post_strategy_exit"),
+        "HARD_SL": (sl_cooldown, "post_sl"),
+        "TRAILING_SL": (sl_cooldown, "post_tsl"),
+        "REVERSAL_FLIP": (flip_cooldown, "post_flip"),
+        "STRATEGY_EXIT": (strategy_exit_cooldown, "post_strategy_exit"),
     }
     reason_str = exit_reason_resolved.value
     cooldown_sec, cooldown_reason = cooldown_by_reason.get(reason_str, (0, ""))
     next_state = "COOLDOWN" if cooldown_sec > 0 else "FLAT"
 
     pipe = redis_sync.pipeline()
-    pipe.set(K.strategy_state(signal.index), next_state)
+    pipe.set(K.vessel_state(signal.strategy_id, signal.index), next_state)
     if cooldown_sec > 0:
-        pipe.set(K.strategy_cooldown_until_ts(signal.index), str(_now_ts_ms() + cooldown_sec * 1000))
-        pipe.set(K.strategy_cooldown_reason(signal.index), cooldown_reason)
+        pipe.set(
+            K.vessel_cooldown_until_ts(signal.strategy_id, signal.index),
+            str(_now_ts_ms() + cooldown_sec * 1000),
+        )
+        pipe.set(K.vessel_cooldown_reason(signal.strategy_id, signal.index), cooldown_reason)
     else:
-        pipe.set(K.strategy_cooldown_until_ts(signal.index), "0")
-        pipe.set(K.strategy_cooldown_reason(signal.index), "")
+        pipe.set(K.vessel_cooldown_until_ts(signal.strategy_id, signal.index), "0")
+        pipe.set(K.vessel_cooldown_reason(signal.strategy_id, signal.index), "")
     if report.pnl > 0:
-        pipe.incr(K.strategy_counters_wins_today(signal.index))
+        pipe.incr(K.vessel_counter_wins(signal.strategy_id, signal.index))
     pipe.execute()
 
     _persist_status(redis_sync, pos_id, PositionStage.DONE)

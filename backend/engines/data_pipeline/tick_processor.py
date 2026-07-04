@@ -7,9 +7,15 @@ spot, periodically flushes to Redis (single-writer per option_chain key),
 and XADDs a tick event to `market_data:stream:tick:{index}`.
 
 Flush cadence:
-  - option_chain JSON: every `FLUSH_INTERVAL_MS` (50ms) per index
+  - option_chain JSON: after every drained queue batch (ticks arriving while
+    a batch is being applied coalesce into the next batch — no fixed timer)
   - spot HASH: every tick (cheap; small payload)
   - tick stream XADD: every tick
+
+Ordering invariant (latency-critical): the option_chain flush ALWAYS happens
+BEFORE the per-token pub/sub notification for the ticks in that batch, so a
+vessel that wakes on `tick.{token}` reads a chain that already contains the
+tick that woke it. There is no fixed flush interval on the hot path.
 
 Backpressure: queue maxsize=10k; on overflow ws_io drops oldest and
 increments `state.ticks_dropped`. Health alert is emitted from main().
@@ -33,7 +39,6 @@ from engines.data_pipeline.parser import ParsedTick, parse_tick
 from engines.data_pipeline.state import DataPipelineState
 from state import keys as K
 
-FLUSH_INTERVAL_MS = 50  # max age of an unsynced option_chain in memory
 STREAM_MAXLEN = 10_000  # MAXLEN ~ 10000 (Schema.md §1.3)
 
 
@@ -66,7 +71,8 @@ async def _process_one_tick(state: DataPipelineState, tick: ParsedTick) -> None:
         await state.redis.publish(K.market_data_pub_tick(tick.token), b"")
         return
 
-    # Option leaf: update the in-memory chain. Caller flushes the JSON periodically.
+    # Option leaf: update the in-memory chain. Caller flushes the JSON and
+    # publishes the tick notification AFTER the flush (ordering invariant).
     chain = state.chain.setdefault(index, {})
     update_option_chain_leaf(chain, strike, side, tick)
 
@@ -77,11 +83,6 @@ async def _process_one_tick(state: DataPipelineState, tick: ParsedTick) -> None:
         maxlen=STREAM_MAXLEN,
         approximate=True,
     )
-    # Pub/sub notification — strategy vessels SUBSCRIBE to tick.{token} for
-    # the basket tokens they care about and trigger their decision loop on
-    # receipt (Strategy.md §2.3, §9.1). Fire-and-forget; subscribers always
-    # read the latest state from Redis on wake-up so no payload is needed.
-    await state.redis.publish(K.market_data_pub_tick(tick.token), b"")
 
 
 async def _flush_chains(state: DataPipelineState, dirty_indexes: set[str]) -> None:
@@ -97,45 +98,64 @@ async def _flush_chains(state: DataPipelineState, dirty_indexes: set[str]) -> No
 
 
 async def tick_processor_loop(state: DataPipelineState) -> None:
-    """Drain ticks, batch-flush option_chains every FLUSH_INTERVAL_MS."""
+    """Drain ticks; flush dirty option_chains + notify vessels after each batch.
+
+    Latency model: under light load every frame is its own batch, so
+    tick -> flush -> vessel wake is a single event-loop pass (sub-ms on the
+    unix socket). Under burst, ticks arriving while a batch is being applied
+    coalesce into the next batch — flush count adapts to load instead of
+    running on a timer, which is what keeps the host from choking without
+    ever dropping a tick (every tick still mutates the in-memory chain and
+    is XADDed to the stream; only the JSON SET is coalesced).
+    """
     log = logger.bind(loop="tick_processor")
     dirty: set[str] = set()
-    last_flush = time.monotonic() * 1000
+    pending_notify: list[str] = []
 
     while not state.shutdown.is_set():
         # Block briefly on the queue.
         try:
             frame: dict[str, Any] = await asyncio.wait_for(state.tick_queue.get(), timeout=0.1)
         except TimeoutError:
-            now = time.monotonic() * 1000
-            if now - last_flush >= FLUSH_INTERVAL_MS and dirty:
-                await _flush_chains(state, dirty)
-                dirty.clear()
-                last_flush = now
             continue
         except Exception as e:
             log.error(f"queue get failed: {e!r}")
             continue
 
-        ticks = parse_tick(frame)
-        for tick in ticks:
+        # Drain everything already queued into this batch (coalescing).
+        frames: list[dict[str, Any]] = [frame]
+        while not state.tick_queue.empty():
             try:
-                meta = state.token_index.get(tick.token)
-                if meta is None:
-                    # Unknown / out-of-window token — drop without counting.
-                    continue
-                await _process_one_tick(state, tick)
-                if meta[2] != "spot":
-                    dirty.add(meta[0])
-                state.ticks_processed += 1
-            except Exception as e:
-                log.warning(f"tick apply failed token={tick.token}: {e!r}")
+                frames.append(state.tick_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
 
-        now = time.monotonic() * 1000
-        if now - last_flush >= FLUSH_INTERVAL_MS and dirty:
+        for fr in frames:
+            for tick in parse_tick(fr):
+                try:
+                    meta = state.token_index.get(tick.token)
+                    if meta is None:
+                        # Unknown / out-of-window token — drop without counting.
+                        continue
+                    await _process_one_tick(state, tick)
+                    if meta[2] != "spot":
+                        dirty.add(meta[0])
+                        pending_notify.append(tick.token)
+                    state.ticks_processed += 1
+                except Exception as e:
+                    log.warning(f"tick apply failed token={tick.token}: {e!r}")
+
+        # Flush BEFORE notifying: a vessel that wakes on tick.{token} must
+        # read a chain that already contains that tick.
+        if dirty:
             await _flush_chains(state, dirty)
             dirty.clear()
-            last_flush = now
+        if pending_notify:
+            pipe = state.redis.pipeline(transaction=False)
+            for token in pending_notify:
+                pipe.publish(K.market_data_pub_tick(token), b"")
+            await pipe.execute()
+            pending_notify.clear()
 
     # Final flush on shutdown.
     if dirty:

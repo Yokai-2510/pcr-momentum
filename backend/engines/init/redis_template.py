@@ -97,9 +97,6 @@ TEMPLATE: dict[str, dict[str, Any]] = {
     K.ORDERS_PNL_REALIZED: {"type": "str", "value": "0"},
     K.ORDERS_PNL_UNREALIZED: {"type": "str", "value": "0"},
     K.ORDERS_PNL_DAY: {"type": "str", "value": "0"},
-    # ── strategy:signals ────────────────────────────────────────────────
-    K.STRATEGY_SIGNALS_ACTIVE: {"type": "set_empty"},
-    K.STRATEGY_SIGNALS_COUNTER: {"type": "str", "value": "0"},
     # ── ui:views ────────────────────────────────────────────────────────
     K.UI_VIEW_DASHBOARD: {"type": "json", "value": {}},
     K.UI_VIEW_POSITIONS_CLOSED_TODAY: {"type": "json", "value": []},
@@ -128,8 +125,6 @@ def _vessel_runtime_keys() -> dict[str, dict[str, Any]]:
     for sid, idx in DEFAULT_VESSELS:
         out[K.vessel_enabled(sid, idx)] = {"type": "str", "value": "true"}
         out[K.vessel_state(sid, idx)] = {"type": "str", "value": "FLAT"}
-        out[K.vessel_phase(sid, idx)] = {"type": "str", "value": "BOOT"}
-        out[K.vessel_phase_entered_ts(sid, idx)] = {"type": "str", "value": "0"}
         out[K.vessel_basket(sid, idx)] = {"type": "json", "value": {"atm": 0, "ce": [], "pe": []}}
         out[K.vessel_current_position_id(sid, idx)] = {"type": "str", "value": ""}
         out[K.vessel_cooldown_until_ts(sid, idx)] = {"type": "str", "value": "0"}
@@ -314,10 +309,7 @@ async def apply(redis: _redis_async.Redis, flush_runtime: bool = True) -> dict[s
             # Lua expects as HASH from the first call).
             pipe.delete(key)
             pipe.hset(key, mapping=spec["value"])
-        elif kind == "hash_empty":
-            skipped += 1
-            continue
-        elif kind == "set_empty":
+        elif kind == "hash_empty" or kind == "set_empty":
             skipped += 1
             continue
         else:

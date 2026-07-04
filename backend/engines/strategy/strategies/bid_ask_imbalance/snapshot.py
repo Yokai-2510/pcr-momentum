@@ -128,7 +128,7 @@ def build_snapshot(
     *,
     instrument_id: str,
     atm: int,
-    basket_ce: list[tuple[int, str]],   # [(strike, token), ...]
+    basket_ce: list[tuple[int, str]],  # [(strike, token), ...]
     basket_pe: list[tuple[int, str]],
     option_chain: dict[str, Any],
     spot: dict[str, Any] | None,
@@ -164,11 +164,7 @@ def build_snapshot(
         pe_legs.append(_build_leg(token, strike, "PE", leaf))
 
     # Pin the held leg if it isn't already in the basket.
-    if (
-        pinned_token
-        and pinned_side in ("CE", "PE")
-        and pinned_strike is not None
-    ):
+    if pinned_token and pinned_side in ("CE", "PE") and pinned_strike is not None:
         target_legs = ce_legs if pinned_side == "CE" else pe_legs
         already = any(leg.token == pinned_token for leg in target_legs)
         if not already:

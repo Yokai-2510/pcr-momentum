@@ -37,7 +37,9 @@ def gate1_direction(
         return GateResult(True, side="CE")
     if net_pressure < -entry_threshold:
         return GateResult(True, side="PE")
-    return GateResult(False, f"net_pressure_{net_pressure:.2f}_below_threshold_{entry_threshold:.2f}")
+    return GateResult(
+        False, f"net_pressure_{net_pressure:.2f}_below_threshold_{entry_threshold:.2f}"
+    )
 
 
 def gate2_ask_wall(wall_state: WallState) -> GateResult:

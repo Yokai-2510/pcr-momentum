@@ -33,7 +33,7 @@ def _now_ms() -> int:
 
 async def probe_redis(redis_async: _redis_async.Redis) -> ProbeResult:
     try:
-        pong = await redis_async.ping()  # type: ignore[misc]
+        pong = await redis_async.ping()
         return ("green", "ok") if pong else ("red", "no_pong")
     except Exception as e:
         return "red", f"ping_failed:{e!r}"
@@ -62,7 +62,7 @@ def probe_broker_rest() -> ProbeResult:
 
 
 async def probe_broker_ws(redis_async: _redis_async.Redis) -> ProbeResult:
-    raw = await redis_async.hgetall(K.MARKET_DATA_WS_STATUS_MARKET)  # type: ignore[misc]
+    raw = await redis_async.hgetall(K.MARKET_DATA_WS_STATUS_MARKET)
     if not raw:
         return "red", "no_ws_status"
     decoded: dict[str, str] = {}
@@ -113,7 +113,7 @@ def probe_swap() -> ProbeResult:
 
 async def probe_engines(redis_async: _redis_async.Redis) -> dict[str, ProbeResult]:
     """Returns per-engine ProbeResult based on heartbeat freshness."""
-    raw = await redis_async.hgetall(K.SYSTEM_HEALTH_HEARTBEATS)  # type: ignore[misc]
+    raw = await redis_async.hgetall(K.SYSTEM_HEALTH_HEARTBEATS)
     if not raw:
         return {}
     out: dict[str, ProbeResult] = {}

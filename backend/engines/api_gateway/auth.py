@@ -67,4 +67,3 @@ def decode_token(token: str, settings: Settings) -> UserContext:
         username=str(payload.get("username") or ""),
         role=str(payload.get("role") or "admin"),
     )
-

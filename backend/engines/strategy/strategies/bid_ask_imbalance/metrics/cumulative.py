@@ -19,7 +19,9 @@ def _sum_or_none(values: list[int | None]) -> int | None:
     return sum(present)
 
 
-def cumulative_imbalance(legs: tuple[StrikeLeg, ...]) -> tuple[int | None, int | None, float | None]:
+def cumulative_imbalance(
+    legs: tuple[StrikeLeg, ...],
+) -> tuple[int | None, int | None, float | None]:
     """Return (Σbid, Σask, ratio) across the given legs.
 
     Ratio is None if Σask is None or 0.

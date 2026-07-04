@@ -73,7 +73,7 @@ def _i(v: Any) -> int | None:
         return None
 
 
-def _pad(seq: list, n: int, fill: Any = None) -> tuple:
+def _pad(seq: list[Any], n: int, fill: Any = None) -> tuple[Any, ...]:
     """Right-pad / truncate a list to length n; return immutable tuple."""
     if len(seq) >= n:
         return tuple(seq[:n])
@@ -82,7 +82,9 @@ def _pad(seq: list, n: int, fill: Any = None) -> tuple:
 
 def _extract_depth(
     bid_ask_quotes: list[dict[str, Any]],
-) -> tuple[tuple, tuple, tuple, tuple, int | None, int | None]:
+) -> tuple[
+    tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], int | None, int | None
+]:
     """Pull 5-level depth out of the bidAskQuote list.
 
     Each entry has the shape:

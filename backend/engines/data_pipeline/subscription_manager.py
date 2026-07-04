@@ -81,7 +81,7 @@ async def bootstrap_subscriptions(state: DataPipelineState) -> set[str]:
 
     Returns the set of tokens that were subscribed.
     """
-    raw = await state.redis.smembers(K.MARKET_DATA_SUBSCRIPTIONS_DESIRED)  # type: ignore[misc]
+    raw = await state.redis.smembers(K.MARKET_DATA_SUBSCRIPTIONS_DESIRED)
     tokens: set[str] = {t.decode() if isinstance(t, bytes) else t for t in (raw or set())}
     if not tokens:
         logger.warning("subscription_manager: subscriptions:desired is empty; nothing to subscribe")
@@ -149,7 +149,7 @@ async def subscription_manager_loop(state: DataPipelineState) -> None:
                     )
                     last_atm[index] = atm
             # Touch heartbeat
-            await state.redis.hset(  # type: ignore[misc]
+            await state.redis.hset(
                 K.SYSTEM_HEALTH_HEARTBEATS,
                 mapping={"data_pipeline.subscription_manager": int(time.time() * 1000)},
             )

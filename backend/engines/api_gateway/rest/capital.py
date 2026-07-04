@@ -84,4 +84,3 @@ async def set_capital_kill_switch(
     data = {"segments": res.get("data") or []}
     await redis.set(K.USER_CAPITAL_KILL_SWITCH, orjson.dumps(data))
     return data
-

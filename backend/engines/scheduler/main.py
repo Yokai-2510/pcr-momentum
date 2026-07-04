@@ -91,9 +91,7 @@ def _resolve_trigger_table(session: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def _make_job(
-    redis_async: _redis_async.Redis, fn_name: str
-) -> Any:
+def _make_job(redis_async: _redis_async.Redis, fn_name: str) -> Any:
     """Bind a redis-aware coroutine to APScheduler."""
     fn = getattr(jobs, fn_name)
 
@@ -127,9 +125,7 @@ def _add_cron(
     )
 
 
-async def _heartbeat_loop(
-    redis_async: _redis_async.Redis, *, shutdown: asyncio.Event
-) -> None:
+async def _heartbeat_loop(redis_async: _redis_async.Redis, *, shutdown: asyncio.Event) -> None:
     while not shutdown.is_set():
         with contextlib.suppress(Exception):
             await redis_async.hset(  # type: ignore[misc]
@@ -158,7 +154,9 @@ async def _amain() -> int:
         _add_cron(scheduler, redis_async, "daily_reset", _DEFAULT_TRIGGERS["daily_reset"])
     if "nightly_maintenance" not in triggers:
         _add_cron(
-            scheduler, redis_async, "nightly_maintenance",
+            scheduler,
+            redis_async,
+            "nightly_maintenance",
             _DEFAULT_TRIGGERS["nightly_maintenance"],
         )
 

@@ -24,8 +24,8 @@ HEARTBEAT_INTERVAL_SEC = 5
 async def heartbeat_task(
     redis_async: _redis_async.Redis,
     *,
-    engine_name: str,                     # "strategy" or "strategy:{sid}" when isolated
-    vessel_keys: list[tuple[str, str]],   # [(strategy_id, instrument_id), ...]
+    engine_name: str,  # "strategy" or "strategy:{sid}" when isolated
+    vessel_keys: list[tuple[str, str]],  # [(strategy_id, instrument_id), ...]
     shutdown: asyncio.Event,
 ) -> None:
     """Periodically HSET heartbeat fields for every active vessel + the engine itself."""
@@ -37,11 +37,11 @@ async def heartbeat_task(
             mapping: dict[str, str] = {engine_name: ts_ms}  # the engine itself
             for sid, idx in vessel_keys:
                 mapping[K.heartbeat_field_vessel(sid, idx)] = ts_ms
-            await redis_async.hset(K.SYSTEM_HEALTH_HEARTBEATS, mapping=mapping)  # type: ignore[misc]
+            await redis_async.hset(K.SYSTEM_HEALTH_HEARTBEATS, mapping=mapping)  # type: ignore[arg-type]
         except Exception as exc:
             log.warning(f"heartbeat HSET failed: {exc!r}")
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=HEARTBEAT_INTERVAL_SEC)
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             continue
     log.info("heartbeat: shutdown")

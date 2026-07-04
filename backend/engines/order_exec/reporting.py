@@ -200,8 +200,12 @@ async def persist_report(pool: asyncpg.Pool, report: ClosedPositionReport) -> st
                 orjson.dumps(payload["pre_open_snapshot"]).decode(),
                 orjson.dumps(payload["market_snapshot_entry"]).decode(),
                 orjson.dumps(payload["market_snapshot_exit"]).decode(),
-                orjson.dumps(payload["exit_eval_history"]).decode() if payload.get("exit_eval_history") else None,
-                orjson.dumps(payload["trailing_history"]).decode() if payload.get("trailing_history") else None,
+                orjson.dumps(payload["exit_eval_history"]).decode()
+                if payload.get("exit_eval_history")
+                else None,
+                orjson.dumps(payload["trailing_history"]).decode()
+                if payload.get("trailing_history")
+                else None,
                 orjson.dumps(payload["order_events"]).decode(),
                 orjson.dumps(payload["latencies"]).decode(),
                 orjson.dumps(payload["pnl_breakdown"]).decode(),

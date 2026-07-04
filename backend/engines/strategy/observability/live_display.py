@@ -48,12 +48,20 @@ def _format_block(sid: str, idx: str, payload: dict[str, Any]) -> str:
 
     # Pick the strike with the highest CE imbalance for the live block
     ce_strikes = sorted(
-        (s for s in per_strike.values() if s.get("side") == "CE" and s.get("imbalance") is not None),
+        (
+            s
+            for s in per_strike.values()
+            if s.get("side") == "CE" and s.get("imbalance") is not None
+        ),
         key=lambda x: x.get("imbalance") or 0,
         reverse=True,
     )
     pe_strikes = sorted(
-        (s for s in per_strike.values() if s.get("side") == "PE" and s.get("imbalance") is not None),
+        (
+            s
+            for s in per_strike.values()
+            if s.get("side") == "PE" and s.get("imbalance") is not None
+        ),
         key=lambda x: x.get("imbalance") or 0,
         reverse=True,
     )
@@ -100,7 +108,9 @@ async def display_loop(
                 last_dec_raw = redis_sync.get(K.vessel_metrics_last_decision(sid, idx))
                 if not last_dec_raw:
                     continue
-                last_dec = orjson.loads(last_dec_raw if isinstance(last_dec_raw, bytes) else last_dec_raw.encode())
+                last_dec = orjson.loads(
+                    last_dec_raw if isinstance(last_dec_raw, bytes) else last_dec_raw.encode()
+                )
                 metrics_per_strike_raw = redis_sync.get(K.vessel_metrics_per_strike(sid, idx))
                 per_strike = (
                     orjson.loads(metrics_per_strike_raw)
@@ -147,6 +157,7 @@ async def display_loop(
 
         try:
             import asyncio
+
             await asyncio.wait_for(shutdown.wait(), timeout=_REFRESH_INTERVAL_SEC)
         except (TimeoutError, Exception):
             continue

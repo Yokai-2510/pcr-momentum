@@ -64,7 +64,7 @@ async def pnl_history(
             f"""
             SELECT ts, index, realized, unrealized, open_count, day_trades
             FROM metrics_pnl_history
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             ORDER BY ts ASC
             """,
             *args,

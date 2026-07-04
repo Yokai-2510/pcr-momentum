@@ -108,4 +108,3 @@ async def upstox_webhook(
     pipe.publish(K.SYSTEM_PUB_SYSTEM_EVENT, '{"event":"auth_refreshed"}')
     await pipe.execute()
     return {"ok": True}
-

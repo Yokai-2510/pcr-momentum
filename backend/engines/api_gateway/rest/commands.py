@@ -38,4 +38,3 @@ async def command_upstox_token_request(redis: Any = Depends(get_redis)) -> dict[
         "notifier_url": data.get("notifier_url"),
         "message": "Approve the request in your Upstox app or WhatsApp; the token will arrive at the notifier webhook.",
     }
-

@@ -30,7 +30,7 @@ from engines.strategy.strategies.bid_ask_imbalance.snapshot import StrikeLeg
 
 @dataclass(slots=True, frozen=True)
 class ContinuationVerdict:
-    hold: bool         # True = keep position; False = soft-exit signal
+    hold: bool  # True = keep position; False = soft-exit signal
     reason: str
     failures: list[str]
 
@@ -40,7 +40,7 @@ _HISTORY_WINDOW = 5
 
 def evaluate_continuation(
     *,
-    side: str,                # "CE" | "PE"
+    side: str,  # "CE" | "PE"
     held_leg: StrikeLeg,
     buffer: StrikeBuffer,
     imbalance_continuation: float = 1.20,
@@ -62,7 +62,9 @@ def evaluate_continuation(
     history = buffer.last_n(_HISTORY_WINDOW)
     bids = [obs.best_bid_qty for obs in history if obs.best_bid_qty is not None]
     if len(bids) >= 2:
-        decreasing = bids[0] > bids[-1] and all(bids[i] >= bids[i + 1] for i in range(len(bids) - 1))
+        decreasing = bids[0] > bids[-1] and all(
+            bids[i] >= bids[i + 1] for i in range(len(bids) - 1)
+        )
         if decreasing:
             failures.append("bid_qty_decreasing")
     # else: insufficient history; don't penalize — strategy waiting for ticks.

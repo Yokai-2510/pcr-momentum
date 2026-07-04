@@ -11,6 +11,7 @@ from engines.api_gateway.deps import get_redis, require_admin
 from engines.api_gateway.errors import APIError
 from engines.api_gateway.util import decode, now_iso, redis_smembers_decoded
 from state import keys as K
+from state import registry
 
 router = APIRouter(tags=["strategy"], dependencies=[Depends(require_admin)])
 
@@ -36,14 +37,15 @@ def _validate_index(index: str) -> str:
 
 @router.get("/strategy/status")
 async def strategy_status(redis: Any = Depends(get_redis)) -> dict[str, Any]:
+    vessels = await registry.list_vessels(redis)
     pipe = redis.pipeline(transaction=False)
     pipe.get(K.SYSTEM_FLAGS_TRADING_ACTIVE)
     pipe.get(K.SYSTEM_FLAGS_MODE)
     pipe.get(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED)
-    for index in K.INDEXES:
-        pipe.get(K.strategy_enabled(index))
-        pipe.get(K.strategy_state(index))
-        pipe.get(K.strategy_current_position_id(index))
+    for sid, instrument in vessels:
+        pipe.get(K.vessel_enabled(sid, instrument))
+        pipe.get(K.vessel_state(sid, instrument))
+        pipe.get(K.vessel_current_position_id(sid, instrument))
     values = await pipe.execute()
     out = {
         "system": {
@@ -51,13 +53,15 @@ async def strategy_status(redis: Any = Depends(get_redis)) -> dict[str, Any]:
             "mode": decode(values[1]) or "paper",
             "daily_loss_circuit_triggered": decode(values[2]).lower() == "true",
         },
-        "indexes": {},
+        "vessels": {},
     }
     offset = 3
-    for index in K.INDEXES:
+    for sid, instrument in vessels:
         enabled, state, pos_id = values[offset : offset + 3]
         offset += 3
-        out["indexes"][index] = {
+        out["vessels"][f"{sid}:{instrument}"] = {
+            "strategy_id": sid,
+            "instrument_id": instrument,
             "enabled": decode(enabled).lower() == "true",
             "state": decode(state) or "FLAT",
             "current_position_id": decode(pos_id) or None,
@@ -68,17 +72,21 @@ async def strategy_status(redis: Any = Depends(get_redis)) -> dict[str, Any]:
 @router.post("/commands/halt_index/{index}")
 async def halt_index(index: str, redis: Any = Depends(get_redis)) -> dict[str, Any]:
     index = _validate_index(index)
-    await redis.set(K.strategy_enabled(index), "false")
+    targets = await registry.vessels_for_instrument(redis, index)
+    for sid, instrument in targets:
+        await redis.set(K.vessel_enabled(sid, instrument), "false")
     await redis.publish(K.SYSTEM_PUB_SYSTEM_EVENT, f'{{"event":"halt_index","index":"{index}"}}')
-    return {"ok": True, "index": index, "enabled": False}
+    return {"ok": True, "index": index, "enabled": False, "vessels_halted": len(targets)}
 
 
 @router.post("/commands/resume_index/{index}")
 async def resume_index(index: str, redis: Any = Depends(get_redis)) -> dict[str, Any]:
     index = _validate_index(index)
-    await redis.set(K.strategy_enabled(index), "true")
+    targets = await registry.vessels_for_instrument(redis, index)
+    for sid, instrument in targets:
+        await redis.set(K.vessel_enabled(sid, instrument), "true")
     await redis.publish(K.SYSTEM_PUB_SYSTEM_EVENT, f'{{"event":"resume_index","index":"{index}"}}')
-    return {"ok": True, "index": index, "enabled": True}
+    return {"ok": True, "index": index, "enabled": True, "vessels_resumed": len(targets)}
 
 
 @router.post("/commands/global_kill")
@@ -122,4 +130,3 @@ async def global_resume(
     )
     await pipe.execute()
     return {"ok": True, "trading_active": True}
-

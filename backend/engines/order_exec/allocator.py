@@ -58,8 +58,9 @@ def check_and_reserve(
         if pipe.sismember(symbols_key, index):
             dep = float(pipe.hget(deployed_key, "total") or 0)
             cnt = int(pipe.hget(open_key, "total") or 0)
-            result.update(ok=False, reason="ALREADY_OPEN_ON_INDEX",
-                          deployed_after=dep, open_after=cnt)
+            result.update(
+                ok=False, reason="ALREADY_OPEN_ON_INDEX", deployed_after=dep, open_after=cnt
+            )
             pipe.unwatch()
             return
 
@@ -68,15 +69,23 @@ def check_and_reserve(
 
         # Cap 2: global concurrency
         if cur_total + 1 > max_concurrent_positions:
-            result.update(ok=False, reason="MAX_CONCURRENT_REACHED",
-                          deployed_after=deployed_total, open_after=cur_total)
+            result.update(
+                ok=False,
+                reason="MAX_CONCURRENT_REACHED",
+                deployed_after=deployed_total,
+                open_after=cur_total,
+            )
             pipe.unwatch()
             return
 
         # Cap 3: capital
         if deployed_total + premium_required_inr > trading_capital_inr:
-            result.update(ok=False, reason="INSUFFICIENT_CAPITAL",
-                          deployed_after=deployed_total, open_after=cur_total)
+            result.update(
+                ok=False,
+                reason="INSUFFICIENT_CAPITAL",
+                deployed_after=deployed_total,
+                open_after=cur_total,
+            )
             pipe.unwatch()
             return
 
@@ -99,7 +108,9 @@ def check_and_reserve(
         try:
             redis_sync.transaction(
                 _txn,
-                deployed_key, open_key, symbols_key,
+                deployed_key,
+                open_key,
+                symbols_key,
                 value_from_callable=False,
             )
             return (
@@ -125,11 +136,12 @@ def release(
     index: str,
     premium_to_release_inr: float,
 ) -> tuple[bool, str]:
-    """Release a previously-held reservation.
+    """Release a previously-held reservation. Idempotent.
 
-    Unconditional; never refuses. If a release is called twice or after
-    a manual reset, the counters may go negative — callers (cleanup path)
-    are expected to call this exactly once per successful reserve.
+    Guards on the index's membership in the open-symbols set, so a double
+    release (or a release when nothing is reserved) is a no-op returning
+    ``(False, "NOT_RESERVED")`` instead of driving the counters negative.
+    The cleanup path can therefore retry safely.
     """
     log = logger.bind(engine="order_exec", index=index)
     deployed_key = K.ORDERS_ALLOCATOR_DEPLOYED
@@ -137,12 +149,16 @@ def release(
     symbols_key = K.ORDERS_ALLOCATOR_OPEN_SYMBOLS
 
     try:
+        # SREM returns the count actually removed (0 or 1); doing it first
+        # both gates idempotency and tells us whether a reservation existed.
+        removed = redis_sync.srem(symbols_key, index)
+        if not removed:
+            return False, "NOT_RESERVED"
         pipe = redis_sync.pipeline(transaction=True)
         pipe.hincrbyfloat(deployed_key, index, -float(premium_to_release_inr))
         pipe.hincrbyfloat(deployed_key, "total", -float(premium_to_release_inr))
         pipe.hincrby(open_key, index, -1)
         pipe.hincrby(open_key, "total", -1)
-        pipe.srem(symbols_key, index)
         pipe.execute()
     except Exception as e:
         log.exception(f"allocator release raised: {e!r}")

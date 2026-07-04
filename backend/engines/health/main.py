@@ -82,9 +82,7 @@ async def _publish_results(
             orjson.dumps(probes.to_dict(res)).decode(),
         )
 
-    summary_status = probes.aggregate_status(
-        list(deps.values()) + list(engines.values())
-    )
+    summary_status = probes.aggregate_status(list(deps.values()) + list(engines.values()))
     pipe.hset(  # type: ignore[misc]
         K.SYSTEM_HEALTH_SUMMARY,
         mapping={
@@ -97,9 +95,7 @@ async def _publish_results(
     if summary_status == "red" and prev_summary != "red":
         try:
             red_parts = [
-                f"{k}={v[0]}({v[1]})"
-                for k, v in {**deps, **engines}.items()
-                if v[0] == "red"
+                f"{k}={v[0]}({v[1]})" for k, v in {**deps, **engines}.items() if v[0] == "red"
             ]
             await redis_async.xadd(  # type: ignore[misc]
                 K.SYSTEM_HEALTH_ALERTS,
@@ -153,9 +149,7 @@ async def _amain() -> int:
             )
             deps = await _run_probes(redis_async, pool)
             engines = await probes.probe_engines(redis_async)
-            prev_summary = await _publish_results(
-                redis_async, deps, engines, prev_summary
-            )
+            prev_summary = await _publish_results(redis_async, deps, engines, prev_summary)
         except Exception as e:
             log.exception(f"health cycle raised: {e!r}")
 

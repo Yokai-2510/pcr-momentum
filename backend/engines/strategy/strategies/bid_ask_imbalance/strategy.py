@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from engines.strategy.strategies.base import Action, ActionKind, Strategy, VesselContext
+from engines.strategy.strategies.base import Action, ActionKind, VesselContext
 from engines.strategy.strategies.bid_ask_imbalance.basket import Basket
 from engines.strategy.strategies.bid_ask_imbalance.buffer import BufferStore
 from engines.strategy.strategies.bid_ask_imbalance.decisions import (
@@ -39,11 +39,11 @@ from engines.strategy.strategies.bid_ask_imbalance.decisions import (
 )
 from engines.strategy.strategies.bid_ask_imbalance.decisions import timing as timing_mod
 from engines.strategy.strategies.bid_ask_imbalance.metrics import imbalance as imbalance_mod
+from engines.strategy.strategies.bid_ask_imbalance.metrics.aggressor import detect_aggressor
 from engines.strategy.strategies.bid_ask_imbalance.metrics.ask_wall import (
     cache_observation_imbalance,
     classify_wall_state,
 )
-from engines.strategy.strategies.bid_ask_imbalance.metrics.aggressor import detect_aggressor
 from engines.strategy.strategies.bid_ask_imbalance.metrics.cumulative import cumulative_imbalance
 from engines.strategy.strategies.bid_ask_imbalance.metrics.pressure import (
     classify_pressure,
@@ -67,10 +67,10 @@ class MemoryStore:
     basket: Basket
     timing_windows: list[timing_mod.TimingWindow] = field(default_factory=list)
     last_action_kind: ActionKind | None = None
-    held_token: str | None = None        # set when state moves to IN_CE/IN_PE
+    held_token: str | None = None  # set when state moves to IN_CE/IN_PE
     held_strike: int | None = None
-    held_side: str | None = None          # "CE" | "PE"
-    suppress_until_ts: int = 0            # post-reversal suppression window
+    held_side: str | None = None  # "CE" | "PE"
+    suppress_until_ts: int = 0  # post-reversal suppression window
 
 
 @dataclass(slots=True)
@@ -178,9 +178,7 @@ class BidAskImbalanceStrategy:
         new entries; this is a no-op since the runner caps actions in DRAIN."""
         return
 
-    def on_tick(
-        self, ctx: VesselContext, snapshot: Any, memory: Any
-    ) -> Action:
+    def on_tick(self, ctx: VesselContext, snapshot: Any, memory: Any) -> Action:
         if not isinstance(snapshot, Snapshot) or not isinstance(memory, MemoryStore):
             return Action(ActionKind.NO_OP, reason="bad_input_types")
 
@@ -197,20 +195,20 @@ class BidAskImbalanceStrategy:
                 qty_multiple=thresholds.ask_wall_qty_multiple,
                 aggressor_tolerance_inr=thresholds.aggressor_tolerance_inr,
             )
-            aggressor = detect_aggressor(
-                leg, tolerance_inr=thresholds.aggressor_tolerance_inr
-            )
+            aggressor = detect_aggressor(leg, tolerance_inr=thresholds.aggressor_tolerance_inr)
             imb = imbalance_mod.compute_imbalance(leg)
             spread = compute_spread(leg)
-            wall_present = (wall_state in ("HOLDING", "ABSORBING", "REFRESHING"))
+            wall_present = wall_state in ("HOLDING", "ABSORBING", "REFRESHING")
             obs = cache_observation_imbalance(
-                leg, imb, spread, wall_present if wall_state != "UNKNOWN" else None,
-                aggressor, ts_ms,
+                leg,
+                imb,
+                spread,
+                wall_present if wall_state != "UNKNOWN" else None,
+                aggressor,
+                ts_ms,
             )
             buf.push(obs)
-            per_strike[leg.token] = _per_strike_metric_dict(
-                leg, thresholds, wall_state, aggressor
-            )
+            per_strike[leg.token] = _per_strike_metric_dict(leg, thresholds, wall_state, aggressor)
 
         # ── Phase 2: cumulative + net pressure ────────────────────────────
         ce_sum_bid, ce_sum_ask, cum_ce = cumulative_imbalance(snapshot.ce_legs)
@@ -265,9 +263,7 @@ class BidAskImbalanceStrategy:
             )
             if rev.triggered:
                 # Find dominant strike on the FLIPPED side for re-entry.
-                opposite_legs = (
-                    snapshot.pe_legs if memory.held_side == "CE" else snapshot.ce_legs
-                )
+                opposite_legs = snapshot.pe_legs if memory.held_side == "CE" else snapshot.ce_legs
                 flip_target = _pick_dominant_strike(opposite_legs, thresholds)
                 if flip_target is None:
                     return Action(
@@ -331,12 +327,12 @@ class BidAskImbalanceStrategy:
             return Action(ActionKind.NO_OP, reason=g1.reason, metrics=base_metrics)
 
         chosen_side = g1.side  # "CE" | "PE"
+        if chosen_side is None:  # defensive: gate1 sets side whenever it passes
+            return Action(ActionKind.NO_OP, reason="gate1_no_side", metrics=base_metrics)
         side_legs = snapshot.ce_legs if chosen_side == "CE" else snapshot.pe_legs
         dominant = _pick_dominant_strike(side_legs, thresholds)
         if dominant is None:
-            return Action(
-                ActionKind.NO_OP, reason="no_dominant_strike", metrics=base_metrics
-            )
+            return Action(ActionKind.NO_OP, reason="no_dominant_strike", metrics=base_metrics)
         dom_buf = memory.buffers.buffer_for(dominant.token)
 
         # Gate 2: ask wall
@@ -385,7 +381,11 @@ class BidAskImbalanceStrategy:
                 ActionKind.NO_OP,
                 reason=why,
                 score=qresult.score,
-                metrics={**base_metrics, "score": qresult.score, "score_breakdown": qresult.breakdown},
+                metrics={
+                    **base_metrics,
+                    "score": qresult.score,
+                    "score_breakdown": qresult.breakdown,
+                },
                 score_breakdown=qresult.breakdown,
             )
 
@@ -401,7 +401,7 @@ class BidAskImbalanceStrategy:
                 metrics={**base_metrics, "score": qresult.score},
                 score_breakdown=qresult.breakdown,
             )
-        qty_lots = max(1, int(round(base_qty * size_factor)))
+        qty_lots = max(1, round(base_qty * size_factor))
 
         return Action(
             kind=ActionKind.ENTER,

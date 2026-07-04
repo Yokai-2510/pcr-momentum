@@ -10,11 +10,9 @@ from __future__ import annotations
 import base64
 import json
 import os
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import pytest_asyncio
 
 from state.credentials_store import (
     _derive_key,
@@ -42,10 +40,10 @@ from state.credentials_store import (
 )
 from state.keys import USER_CREDENTIALS_UPSTOX
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _deterministic_key():
@@ -57,29 +55,31 @@ def _deterministic_key():
 
 
 class _FakeConnection:
-    """Minimal asyncpg.Connection stand-in for CRUD unit tests."""
+    """Minimal asyncpg.Connection stand-in for CRUD unit tests.
+
+    Mirrors asyncpg semantics the store relies on: `fetchrow` returns None
+    for a missing row (and a subscriptable record otherwise), and DELETE is
+    executed with only the broker argument.
+    """
 
     def __init__(self) -> None:
         self._rows: dict[str, bytes] = {}
-        self._last_result: str = ""
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         broker = args[0]
-        return SimpleNamespace(encrypted_value=self._rows.get(broker))
+        if broker not in self._rows:
+            return None
+        return {"encrypted_value": self._rows[broker]}
 
     async def execute(self, sql: str, *args: Any) -> str:
         broker = args[0]
-        encrypted = args[1]
         if "DELETE" in sql:
             if broker in self._rows:
                 del self._rows[broker]
-                self._last_result = "DELETE 1"
-            else:
-                self._last_result = "DELETE 0"
-            return self._last_result
-        self._rows[broker] = encrypted
-        self._last_result = "INSERT 0 1"
-        return self._last_result
+                return "DELETE 1"
+            return "DELETE 0"
+        self._rows[broker] = args[1]
+        return "INSERT 0 1"
 
 
 @pytest.fixture
@@ -90,6 +90,7 @@ def fake_conn():
 # ---------------------------------------------------------------------------
 # Key derivation
 # ---------------------------------------------------------------------------
+
 
 class TestDeriveKey:
     def test_urlsafe_b64(self) -> None:
@@ -120,6 +121,7 @@ class TestDeriveKey:
 # Encryption round-trip
 # ---------------------------------------------------------------------------
 
+
 class TestEncryptDecrypt:
     def test_blob_round_trip(self) -> None:
         plain = b"sensitive-upstox-secret"
@@ -139,15 +141,18 @@ class TestEncryptDecrypt:
         assert b1 != b2
 
     def test_tampered_blob_fails(self) -> None:
+        from cryptography.exceptions import InvalidTag
+
         blob = bytearray(encrypt_blob(b"original"))
         blob[-1] ^= 0xFF
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_blob(bytes(blob))
 
 
 # ---------------------------------------------------------------------------
 # Masking
 # ---------------------------------------------------------------------------
+
 
 class TestMasking:
     def test_mask_value_none(self) -> None:
@@ -157,7 +162,8 @@ class TestMasking:
         assert mask_value("abc") == "****"
 
     def test_mask_long_string(self) -> None:
-        assert mask_value("verylongsecret", keep=4) == "****ongsecret"
+        # Masks everything except the last `keep` characters.
+        assert mask_value("verylongsecret", keep=4) == "****cret"
 
     def test_mask_credentials(self) -> None:
         data = {
@@ -177,13 +183,14 @@ class TestMasking:
         assert masked["analytics_token"] == "****"
         assert masked["sandbox_token"] == "****"
         assert masked["pin"] == "****"
-        assert masked["mobile_no"] == "*****926729"
+        assert masked["mobile_no"] == "******6729"
         assert masked["redirect_uri"] == "https://example.com"
 
 
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 class TestValidation:
     def test_complete_payload_passes(self) -> None:
@@ -207,6 +214,7 @@ class TestValidation:
 # ---------------------------------------------------------------------------
 # Postgres CRUD (fake connection)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 class TestPostgresCrud:
@@ -237,6 +245,7 @@ class TestPostgresCrud:
 # Redis sync (fakeredis)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 class TestRedisSync:
     async def test_sync_to_redis(self, fake_redis_async) -> None:
@@ -256,6 +265,7 @@ class TestRedisSync:
 # ---------------------------------------------------------------------------
 # Convenience round-trip (fake conn + fake redis)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 class TestConvenience:
@@ -278,6 +288,7 @@ class TestConvenience:
 # ---------------------------------------------------------------------------
 # Local file bootstrap
 # ---------------------------------------------------------------------------
+
 
 class TestLocalFile:
     def test_missing_file(self, tmp_path) -> None:
@@ -307,15 +318,14 @@ class TestBootstrapFromFile:
         assert await read_credentials(fake_conn, "upstox") == payload
 
     async def test_missing_file(self, fake_conn, fake_redis_async, tmp_path) -> None:
-        result = await bootstrap_from_file(
-            fake_conn, fake_redis_async, str(tmp_path / "nope.json")
-        )
+        result = await bootstrap_from_file(fake_conn, fake_redis_async, str(tmp_path / "nope.json"))
         assert result is False
 
 
 # ---------------------------------------------------------------------------
 # Init-engine helpers
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 class TestInitEngineHelpers:
@@ -350,6 +360,7 @@ class TestInitEngineHelpers:
 # ---------------------------------------------------------------------------
 # Integration: real Postgres pool (gated)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 class TestPostgresIntegration:

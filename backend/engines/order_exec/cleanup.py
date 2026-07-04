@@ -34,6 +34,7 @@ def cleanup(
     pos_id: str,
     sig_id: str,
     order_ids: list[str],
+    strategy_id: str,
     index: str,
 ) -> int:
     """Run the per-position teardown. Returns count of DEL/SREM operations
@@ -54,7 +55,7 @@ def cleanup(
     pipe.srem(K.ORDERS_POSITIONS_OPEN, pos_id)
     pipe.srem(K.orders_positions_open_by_index(index), pos_id)
     pipe.sadd(K.ORDERS_POSITIONS_CLOSED_TODAY, pos_id)
-    pipe.set(K.strategy_current_position_id(index), "")
+    pipe.set(K.vessel_current_position_id(strategy_id, index), "")
 
     try:
         results = pipe.execute()

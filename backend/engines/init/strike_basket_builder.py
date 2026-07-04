@@ -17,6 +17,7 @@ from loguru import logger
 
 from brokers.upstox import UpstoxAPI
 from state import keys as K
+from state import registry
 
 # Spot index identifier for each named index (Schema.md §1.3 + TDD §3.7)
 INDEX_SPOT_TOKENS: dict[str, str] = {
@@ -124,13 +125,25 @@ def build_trading_basket(
 
 
 async def _read_index_config(redis: _redis_async.Redis, index: str) -> dict[str, Any]:
-    raw = await redis.get(K.strategy_config_index(index))
+    # Basket-build params (strike_step, windows) live in per-vessel instrument
+    # config; any registered vessel on this instrument carries them.
+    raw = None
+    for sid, instrument in await registry.vessels_for_instrument(redis, index):
+        raw = await redis.get(K.strategy_config_instrument(sid, instrument))
+        if raw:
+            break
     if not raw:
         raise RuntimeError(f"strike_basket_builder: missing config for {index}")
     if isinstance(raw, str):
         raw = raw.encode()
     parsed: dict[str, Any] = orjson.loads(raw)
     return parsed
+
+
+async def _disable_vessels_on(redis: _redis_async.Redis, index: str) -> None:
+    """Market-data build failed for this instrument — disable every vessel on it."""
+    for sid, instrument in await registry.vessels_for_instrument(redis, index):
+        await redis.set(K.vessel_enabled(sid, instrument), "false")
 
 
 async def build_for_index(
@@ -153,7 +166,7 @@ async def build_for_index(
     # 1. Spot LTP
     ltp_res = UpstoxAPI.get_ltp({"instrument_keys": [spot_token], "access_token": access_token})
     if not ltp_res["success"] or spot_token not in (ltp_res["data"] or {}):
-        await redis.set(K.strategy_enabled(index), "false")
+        await _disable_vessels_on(redis, index)
         return {"error": f"spot_ltp_failed: {ltp_res['error']}"}
     spot = float(ltp_res["data"][spot_token])
 
@@ -166,14 +179,14 @@ async def build_for_index(
         {"instrument_key": spot_token, "access_token": access_token}
     )
     if not cres["success"]:
-        await redis.set(K.strategy_enabled(index), "false")
+        await _disable_vessels_on(redis, index)
         return {"error": f"contracts_failed: {cres['error']}"}
     contracts = cres["data"] or []
 
     # 4. Nearest expiry
     expiry = discover_nearest_expiry(contracts, today)
     if not expiry:
-        await redis.set(K.strategy_enabled(index), "false")
+        await _disable_vessels_on(redis, index)
         return {"error": "no_future_expiry"}
 
     # 5. Filter to ATM ± subscription window
@@ -207,7 +220,8 @@ async def build_for_index(
     pipe = redis.pipeline(transaction=False)
     pipe.set(K.market_data_index_meta(index), orjson.dumps(meta))
     pipe.set(K.market_data_index_option_chain(index), orjson.dumps(chain))
-    pipe.set(K.strategy_basket(index), orjson.dumps(basket))
+    for _vs, _vi in await registry.vessels_for_instrument(redis, index):
+        pipe.set(K.vessel_basket(_vs, _vi), orjson.dumps(basket))
 
     # 9. Add tokens to subscription:desired
     all_tokens = {c["instrument_key"] for c in in_window if c.get("instrument_key")}

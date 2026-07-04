@@ -32,10 +32,10 @@ class TickObservation:
     best_ask_qty: int | None
     total_bid_qty: int | None
     total_ask_qty: int | None
-    imbalance: float | None       # cached from this tick's metric compute
+    imbalance: float | None  # cached from this tick's metric compute
     spread: float | None
     ask_wall_present: bool | None
-    aggressor: str | None         # "buy" | "sell" | None
+    aggressor: str | None  # "buy" | "sell" | None
 
 
 class StrikeBuffer:

@@ -78,7 +78,7 @@ def maybe_shift_basket(
     basket_size: int,
     now_ms: int,
     hysteresis_sec: int = 5,
-    token_lookup: Any | None = None,        # callable: (strike, side) -> token | None
+    token_lookup: Any | None = None,  # callable: (strike, side) -> token | None
 ) -> BasketTransition | None:
     """Return a transition if a shift is warranted; else None.
 
@@ -112,11 +112,7 @@ def maybe_shift_basket(
     added = sorted(new_tokens - old_tokens)
     dropped = sorted(old_tokens - new_tokens)
 
-    reason = (
-        "initial_build"
-        if not current.ce_tokens
-        else f"atm_shift_{current.atm}->{new_atm}"
-    )
+    reason = "initial_build" if not current.ce_tokens else f"atm_shift_{current.atm}->{new_atm}"
 
     return BasketTransition(
         new_basket=new_basket,

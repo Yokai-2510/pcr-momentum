@@ -37,13 +37,9 @@ async def test_probe_engines_classifies_freshness(
     # init: fresh (1s old)
     await fake_redis_async.hset(K.SYSTEM_HEALTH_HEARTBEATS, "init", str(now_ms - 1_000))
     # data_pipeline: yellow zone (20s old)
-    await fake_redis_async.hset(
-        K.SYSTEM_HEALTH_HEARTBEATS, "data_pipeline", str(now_ms - 20_000)
-    )
+    await fake_redis_async.hset(K.SYSTEM_HEALTH_HEARTBEATS, "data_pipeline", str(now_ms - 20_000))
     # strategy: red zone (60s old)
-    await fake_redis_async.hset(
-        K.SYSTEM_HEALTH_HEARTBEATS, "strategy", str(now_ms - 60_000)
-    )
+    await fake_redis_async.hset(K.SYSTEM_HEALTH_HEARTBEATS, "strategy", str(now_ms - 60_000))
 
     res = await probes.probe_engines(fake_redis_async)
     assert res["init"][0] == "green"

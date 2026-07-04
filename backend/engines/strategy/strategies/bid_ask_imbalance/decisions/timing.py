@@ -63,9 +63,7 @@ def current_window(now_t: dt_time, windows: list[TimingWindow]) -> TimingWindow 
     return None
 
 
-def entry_allowed(
-    now_t: dt_time, windows: list[TimingWindow], score: int
-) -> tuple[bool, str]:
+def entry_allowed(now_t: dt_time, windows: list[TimingWindow], score: int) -> tuple[bool, str]:
     """Is a fresh entry allowed at `now_t` with the given quality score?"""
     w = current_window(now_t, windows)
     if w is None:

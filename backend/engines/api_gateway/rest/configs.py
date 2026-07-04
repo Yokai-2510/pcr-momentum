@@ -22,14 +22,26 @@ _MODEL_BY_SECTION: dict[str, type[BaseModel]] = {
     "execution": ExecutionConfig,
     "session": SessionConfig,
     "risk": RiskConfig,
-    "index:nifty50": IndexConfig,
-    "index:banknifty": IndexConfig,
 }
 
 
+def _model_for_section(section: str) -> type[BaseModel] | None:
+    if section in _MODEL_BY_SECTION:
+        return _MODEL_BY_SECTION[section]
+    if section.startswith("instrument:"):
+        return IndexConfig
+    if section.startswith("strategy:"):
+        return None  # strategy config is strategy-defined; stored as free-form JSON
+    return None
+
+
 def _validate_section(section: str) -> str:
-    if section not in _MODEL_BY_SECTION:
-        raise APIError(404, "CONFIG_SECTION_NOT_FOUND", f"Unknown config section {section!r}")
+    try:
+        redis_key_for_config(section)
+    except KeyError:
+        raise APIError(
+            404, "CONFIG_SECTION_NOT_FOUND", f"Unknown config section {section!r}"
+        ) from None
     return section
 
 
@@ -67,19 +79,24 @@ async def get_configs(
     redis: Any = Depends(get_redis),
     pool: Any = Depends(get_postgres),
 ) -> dict[str, Any]:
-    sections = {
-        section: await _load_section(redis, pool, section)
-        for section in RUNTIME_CONFIG_REDIS_MAP
-    }
-    return {
+    from state.config_loader import load_runtime_configs
+
+    raw = await load_runtime_configs(pool)
+    section_names = set(RUNTIME_CONFIG_REDIS_MAP) | set(raw)
+    sections = {section: await _load_section(redis, pool, section) for section in section_names}
+    out: dict[str, Any] = {
         "execution": sections.get("execution") or {},
         "session": sections.get("session") or {},
         "risk": sections.get("risk") or {},
-        "indexes": {
-            "nifty50": sections.get("index:nifty50") or {},
-            "banknifty": sections.get("index:banknifty") or {},
-        },
+        "strategies": {},
+        "instruments": {},
     }
+    for section, value in sections.items():
+        if section.startswith("strategy:"):
+            out["strategies"][section.partition(":")[2]] = value or {}
+        elif section.startswith("instrument:"):
+            out["instruments"][section.partition(":")[2]] = value or {}
+    return out
 
 
 @router.get("/configs/{section}")
@@ -104,9 +121,14 @@ async def put_config_section(
     user: UserContext = Depends(require_admin),
 ) -> dict[str, Any]:
     section = _validate_section(section)
-    model = _MODEL_BY_SECTION[section]
-    validated = model.model_validate(payload)
-    value = validated.model_dump(mode="json")
+    model = _model_for_section(section)
+    if model is not None:
+        value = model.model_validate(payload).model_dump(mode="json")
+    else:
+        # strategy:{sid} sections are strategy-defined free-form JSON.
+        if not isinstance(payload, dict):
+            raise APIError(400, "CONFIG_INVALID", "Config payload must be a JSON object")
+        value = payload
     async with pool.acquire() as conn:
         await conn.execute(
             """

@@ -39,7 +39,7 @@ from engines.init import (
 )
 from log_setup import configure
 from state import keys as K
-from state import postgres_client, redis_client
+from state import postgres_client, redis_client, registry
 from state.config_loader import get_settings
 
 
@@ -72,7 +72,7 @@ async def main() -> int:
     try:
         redis_client.init_pools()
         redis = redis_client.get_redis()
-        await redis.ping()  # type: ignore[misc]
+        await redis.ping()
     except Exception as e:
         log.error(f"step1: redis connect failed: {e}")
         return 1
@@ -197,10 +197,14 @@ async def main() -> int:
     log.info(f"step10: mode={effective_mode}")
 
     # ── STEP 11: Per-index basket build ─────────────────────────────────
+    vessels = await registry.list_vessels(redis)
     enabled_indexes: list[K.IndexName] = []
     for idx in K.INDEXES:
-        flag = await _read_str(redis, K.strategy_enabled(idx), "true")
-        if flag.lower() == "true":
+        idx_vessels = [(s, i) for s, i in vessels if i == idx]
+        if not idx_vessels:
+            continue
+        flags = [await _read_str(redis, K.vessel_enabled(s, i), "true") for s, i in idx_vessels]
+        if any(f.lower() == "true" for f in flags):
             enabled_indexes.append(idx)
     if not enabled_indexes:
         log.error("step11: no indexes enabled; skipping the day")
@@ -216,7 +220,9 @@ async def main() -> int:
             )
         except Exception as e:
             log.error(f"step11[{active_idx}]: builder raised: {e}")
-            await redis.set(K.strategy_enabled(active_idx), "false")
+            for _vs, _vi in vessels:
+                if _vi == active_idx:
+                    await redis.set(K.vessel_enabled(_vs, _vi), "false")
             continue
         if "error" in res:
             log.warning(f"step11[{active_idx}]: failed: {res['error']}")

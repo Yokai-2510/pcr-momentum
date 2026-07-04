@@ -42,6 +42,10 @@ class FakePool:
     def acquire(self) -> FakeAcquire:
         return FakeAcquire(self.conn)
 
+    async def fetch(self, sql: str, *args: Any) -> list[FakeRow]:
+        # load_runtime_configs treats non-asyncpg.Pool objects as connections.
+        return await self.conn.fetch(sql, *args)
+
 
 class FakeConn:
     def __init__(self) -> None:
@@ -72,7 +76,7 @@ class FakeConn:
                 "max_concurrent_positions": 2,
                 "trading_capital_inr": 200000,
             },
-            "index:nifty50": {
+            "instrument:bid_ask_imbalance_v1:nifty50": {
                 "index": "nifty50",
                 "strike_step": 50,
                 "lot_size": 75,
@@ -93,7 +97,7 @@ class FakeConn:
                 "max_hold_sec": 1500,
                 "delta_pcr_required_for_entry": False,
             },
-            "index:banknifty": {
+            "instrument:bid_ask_imbalance_v1:banknifty": {
                 "index": "banknifty",
                 "strike_step": 100,
                 "lot_size": 35,
@@ -127,7 +131,9 @@ class FakeConn:
             return None
         return None
 
-    async def fetch(self, _sql: str, *_args: Any) -> list[FakeRow]:
+    async def fetch(self, sql: str, *_args: Any) -> list[FakeRow]:
+        if "FROM config_settings" in sql:
+            return [FakeRow({"key": k, "value": v}) for k, v in self.configs.items()]
         return []
 
     async def fetchval(self, sql: str, *_args: Any) -> int:
@@ -212,7 +218,13 @@ class FakeRedis:
     async def hgetall(self, key: str) -> dict[str, Any]:
         return dict(self.hashes.get(key, {}))
 
-    async def hset(self, key: str, field: str | None = None, value: Any = None, mapping: dict[str, Any] | None = None) -> int:
+    async def hset(
+        self,
+        key: str,
+        field: str | None = None,
+        value: Any = None,
+        mapping: dict[str, Any] | None = None,
+    ) -> int:
         target = self.hashes.setdefault(key, {})
         if mapping:
             target.update(mapping)
@@ -293,7 +305,9 @@ def test_configs_read_and_write_through(api_app: tuple[Any, FakeRedis, FakePool]
             headers = {"Authorization": f"Bearer {token}"}
             res = await client.get("/configs", headers=headers)
             assert res.status_code == 200
-            assert res.json()["risk"]["trading_capital_inr"] == 200000
+            body = res.json()
+            assert body["risk"]["trading_capital_inr"] == 200000
+            assert body["instruments"]["bid_ask_imbalance_v1:nifty50"]["strike_step"] == 50
 
             updated = dict(pool.conn.configs["risk"])
             updated["trading_capital_inr"] = 250000
@@ -308,6 +322,9 @@ def test_configs_read_and_write_through(api_app: tuple[Any, FakeRedis, FakePool]
 def test_strategy_commands_and_manual_exit(api_app: tuple[Any, FakeRedis, FakePool]) -> None:
     app, redis, _pool = api_app
 
+    # halt_index resolves targets from the vessel registry.
+    redis.sets[K.STRATEGY_REGISTRY] = {"bid_ask_imbalance_v1:nifty50"}
+
     async def _run() -> None:
         async with _client(app) as client:
             token = await _token(client)
@@ -315,7 +332,8 @@ def test_strategy_commands_and_manual_exit(api_app: tuple[Any, FakeRedis, FakePo
 
             halt = await client.post("/commands/halt_index/nifty50", headers=headers)
             assert halt.json()["enabled"] is False
-            assert redis.strings[K.strategy_enabled("nifty50")] == "false"
+            assert halt.json()["vessels_halted"] == 1
+            assert redis.strings[K.vessel_enabled("bid_ask_imbalance_v1", "nifty50")] == "false"
 
             pos_id = "pos-1"
             redis.hashes[K.orders_position(pos_id)] = {"pos_id": pos_id, "index": "nifty50"}
@@ -360,6 +378,7 @@ def test_credentials_mask_and_delete(
         "pin": "123456",
         "analytics_token": "token1234",
     }
+
     async def _run() -> None:
         async with _client(app) as client:
             token = await _token(client)
@@ -383,7 +402,9 @@ def test_stream_route_and_snapshot_builder(api_app: tuple[Any, FakeRedis, FakePo
     redis.strings[K.UI_VIEW_DASHBOARD] = orjson.dumps(
         {"ts": datetime.now(UTC).isoformat(), "system_state": {"mode": "paper"}}
     )
-    assert any(getattr(route, "path", "") == "/stream" for route in app.routes)
+    # FastAPI ≥0.139 wraps included routers, so app.routes no longer lists
+    # sub-routes directly; resolve by endpoint name instead.
+    assert app.url_path_for("stream") == "/stream"
 
     async def _run() -> None:
         snap = await snapshot(redis, ["dashboard"])

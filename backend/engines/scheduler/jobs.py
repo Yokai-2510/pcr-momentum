@@ -21,9 +21,7 @@ from loguru import logger
 from state import keys as K
 
 
-async def _publish(
-    redis_async: _redis_async.Redis, kind: str, **fields: str
-) -> str:
+async def _publish(redis_async: _redis_async.Redis, kind: str, **fields: str) -> str:
     """XADD a scheduler event. Returns the entry id (or empty on failure)."""
     payload = {"kind": kind, "ts_ms": str(int(time.time() * 1000)), **fields}
     try:
@@ -34,9 +32,7 @@ async def _publish(
             approximate=True,
         )
     except Exception as e:
-        logger.bind(engine="scheduler").warning(
-            f"_publish({kind}) failed: {e!r}"
-        )
+        logger.bind(engine="scheduler").warning(f"_publish({kind}) failed: {e!r}")
         return ""
     if isinstance(entry_id, bytes):
         entry_id = entry_id.decode()

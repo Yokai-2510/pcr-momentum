@@ -61,7 +61,11 @@ def _masked(creds: dict[str, Any], auth_status: str) -> dict[str, Any]:
 async def get_upstox_credentials(redis: Any = Depends(get_redis)) -> dict[str, Any]:
     creds = await _read_creds(redis)
     auth_status_raw = await redis.get(K.SYSTEM_HEALTH_AUTH)
-    auth_status = auth_status_raw.decode() if isinstance(auth_status_raw, bytes) else str(auth_status_raw or "unknown")
+    auth_status = (
+        auth_status_raw.decode()
+        if isinstance(auth_status_raw, bytes)
+        else str(auth_status_raw or "unknown")
+    )
     return _masked(creds, auth_status)
 
 

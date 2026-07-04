@@ -65,7 +65,11 @@ def evaluate(
         return True, ExitReason.HARD_TARGET
 
     # 5. Trailing Stop Loss
-    if position.tsl_armed and position.tsl_level is not None and current_premium <= position.tsl_level:
+    if (
+        position.tsl_armed
+        and position.tsl_level is not None
+        and current_premium <= position.tsl_level
+    ):
         return True, ExitReason.TRAILING_SL
 
     # 6. Liquidity exit (suppressed in last 15 min before EOD)

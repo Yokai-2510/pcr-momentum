@@ -37,7 +37,7 @@ async def health(redis: Any = Depends(get_redis)) -> dict[str, Any]:
 
     engines: dict[str, Any] = {}
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    for name in K.HEARTBEAT_FIELDS:
+    for name in sorted(set(K.HEARTBEAT_FIELDS_STATIC) | set(hb_hash)):
         ts_raw = hb_hash.get(name)
         ts_ms = int(ts_raw) if ts_raw and ts_raw.isdigit() else 0
         engines[name] = {
@@ -59,9 +59,7 @@ async def health(redis: Any = Depends(get_redis)) -> dict[str, Any]:
         dependencies[name] = _probe_to_public(parsed) if isinstance(parsed, dict) else "UNKNOWN"
 
     status = summary_hash.get("status", "UNKNOWN").lower()
-    summary = {"green": "OK", "yellow": "DEGRADED", "red": "DOWN"}.get(
-        status, status.upper()
-    )
+    summary = {"green": "OK", "yellow": "DEGRADED", "red": "DOWN"}.get(status, status.upper())
     return {
         "summary": summary,
         "engines": engines,

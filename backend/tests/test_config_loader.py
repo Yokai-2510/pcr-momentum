@@ -44,9 +44,12 @@ class TestRuntimeConfigMap:
         assert config_loader.redis_key_for_config("execution") == "strategy:configs:execution"
         assert config_loader.redis_key_for_config("session") == "strategy:configs:session"
         assert config_loader.redis_key_for_config("risk") == "strategy:configs:risk"
+        assert config_loader.redis_key_for_config("strategy:bid_ask_imbalance_v1") == (
+            "strategy:configs:strategies:bid_ask_imbalance_v1"
+        )
         assert (
-            config_loader.redis_key_for_config("index:nifty50")
-            == "strategy:configs:indexes:nifty50"
+            config_loader.redis_key_for_config("instrument:bid_ask_imbalance_v1:nifty50")
+            == "strategy:configs:strategies:bid_ask_imbalance_v1:instruments:nifty50"
         )
 
     def test_redis_key_for_unknown_raises(self) -> None:

@@ -36,9 +36,7 @@ def _decode(value: Any) -> str:
     return str(value)
 
 
-async def _persist_one(
-    pool: asyncpg.Pool, payload_str: str
-) -> tuple[bool, str]:
+async def _persist_one(pool: asyncpg.Pool, payload_str: str) -> tuple[bool, str]:
     """Validate + INSERT a single buffered report. Returns (ok, reason)."""
     try:
         payload = orjson.loads(payload_str)
@@ -89,9 +87,7 @@ async def drain_loop(
             if drained % 50 == 0:
                 log.info(f"drained {drained} reports so far")
             continue
-        if reason.startswith("schema_validation_failed") or reason.startswith(
-            "json_decode_failed"
-        ):
+        if reason.startswith("schema_validation_failed") or reason.startswith("json_decode_failed"):
             log.error(f"report_drainer: dropping malformed payload: {reason}")
             continue
         # DB / transient failure → re-queue at the head and backoff.

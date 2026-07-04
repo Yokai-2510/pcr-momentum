@@ -142,7 +142,7 @@ async def main() -> int:
     try:
         redis_client.init_pools()
         redis = redis_client.get_redis()
-        await redis.ping()  # type: ignore[misc]
+        await redis.ping()
     except Exception as e:
         log.error(f"redis connect failed: {e}")
         return 1
@@ -155,7 +155,7 @@ async def main() -> int:
 
     # Mark engine_up before kicking the WS — Health watches this.
     await redis.set(K.system_flag_engine_up("data_pipeline"), "true")
-    await redis.hset(  # type: ignore[misc]
+    await redis.hset(
         K.SYSTEM_HEALTH_HEARTBEATS,
         mapping={"data_pipeline": int(time.time() * 1000)},
     )

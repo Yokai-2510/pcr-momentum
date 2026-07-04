@@ -68,9 +68,7 @@ async def _ensure_scheduler_group(redis_async: _redis_async.Redis) -> None:
         )
     except Exception as e:
         if "BUSYGROUP" not in str(e):
-            logger.bind(engine="background").warning(
-                f"xgroup_create scheduler group raised: {e!r}"
-            )
+            logger.bind(engine="background").warning(f"xgroup_create scheduler group raised: {e!r}")
 
 
 async def _on_daily_reset(redis_async: _redis_async.Redis) -> None:
@@ -135,9 +133,7 @@ async def _scheduler_consumer(
                     )
 
 
-async def _heartbeat_loop(
-    redis_async: _redis_async.Redis, *, shutdown: asyncio.Event
-) -> None:
+async def _heartbeat_loop(redis_async: _redis_async.Redis, *, shutdown: asyncio.Event) -> None:
     while not shutdown.is_set():
         with contextlib.suppress(Exception):
             await redis_async.hset(  # type: ignore[misc]

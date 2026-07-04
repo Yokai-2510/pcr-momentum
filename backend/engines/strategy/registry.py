@@ -25,6 +25,8 @@ from loguru import logger
 from engines.strategy.strategies.base import Strategy, VesselContext
 from engines.strategy.strategies.bid_ask_imbalance import (
     STRATEGY_ID as BID_ASK_ID,
+)
+from engines.strategy.strategies.bid_ask_imbalance import (
     BidAskImbalanceStrategy,
 )
 from state import keys as K
@@ -106,9 +108,7 @@ def discover_vessels(
             strategy_config=strategy_cfg,
             instrument_config=instrument_cfg,
         )
-        specs.append(
-            VesselSpec(strategy_id=sid, instrument_id=idx, strategy=strategy, context=ctx)
-        )
+        specs.append(VesselSpec(strategy_id=sid, instrument_id=idx, strategy=strategy, context=ctx))
         log.info(f"registry: discovered vessel {sid}:{idx}")
 
     return specs

@@ -71,42 +71,54 @@ def _opt_dict(payload: dict[str, str], key: str) -> dict:
         return {}
     try:
         import orjson
+
         parsed = orjson.loads(raw if isinstance(raw, bytes) else raw.encode())
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
 
+def _metrics_dict(payload: dict[str, str], key: str) -> dict[str, float]:
+    """Parse the free-form metrics blob; keep numeric values only."""
+    raw = _opt_dict(payload, key)
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        try:
+            out[str(k)] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 async def _signal_from_payload(payload: dict[str, str]) -> Signal | None:
     """Reconstruct a Signal from stream entry fields (all string-typed in Redis).
 
-    Signal payload v2 (Strategy.md §9.4) — strategy_id + score are first-class.
+    Signal payload v3 (Strategy.md §9.4, Step 3 trim) — strategy_id + score
+    are first-class; strategy-specific metrics travel in `metrics_at_signal`.
     `instrument_id` and `index` are duplicated for backward-compat.
     """
     try:
         instrument_id = payload.get("instrument_id") or payload.get("index", "nifty50")
-        return Signal.model_validate({
-            "sig_id": payload["sig_id"],
-            "strategy_id": payload.get("strategy_id", "bid_ask_imbalance_v1"),
-            "instrument_id": instrument_id,
-            "index": payload.get("index") or instrument_id,
-            "side": payload["side"],
-            "strike": int(payload["strike"]),
-            "instrument_token": payload["instrument_token"],
-            "intent": payload["intent"],
-            "qty_lots": int(payload["qty_lots"]),
-            "score": _opt_float(payload, "score"),
-            "score_breakdown": _opt_dict(payload, "score_breakdown"),
-            "net_pressure_at_signal": _opt_float(payload, "net_pressure_at_signal"),
-            "decision_ts": _opt_int(payload, "decision_ts") or int(__import__("time").time() * 1000),
-            "diff_at_signal": _opt_float(payload, "diff_at_signal") or 0.0,
-            "sum_ce_at_signal": _opt_float(payload, "sum_ce_at_signal") or 0.0,
-            "sum_pe_at_signal": _opt_float(payload, "sum_pe_at_signal") or 0.0,
-            "delta_at_signal": _opt_float(payload, "delta_at_signal") or 0.0,
-            "delta_pcr_at_signal": _opt_float(payload, "delta_pcr_at_signal"),
-            "strategy_version": payload.get("strategy_version", ""),
-            "ts": payload["ts"],
-        })
+        return Signal.model_validate(
+            {
+                "sig_id": payload["sig_id"],
+                "strategy_id": payload.get("strategy_id", "bid_ask_imbalance_v1"),
+                "instrument_id": instrument_id,
+                "index": payload.get("index") or instrument_id,
+                "side": payload["side"],
+                "strike": int(payload["strike"]),
+                "instrument_token": payload["instrument_token"],
+                "intent": payload["intent"],
+                "qty_lots": int(payload["qty_lots"]),
+                "score": _opt_float(payload, "score"),
+                "score_breakdown": _opt_dict(payload, "score_breakdown"),
+                "net_pressure_at_signal": _opt_float(payload, "net_pressure_at_signal"),
+                "decision_ts": _opt_int(payload, "decision_ts")
+                or int(__import__("time").time() * 1000),
+                "metrics_at_signal": _metrics_dict(payload, "metrics_at_signal"),
+                "ts": payload["ts"],
+            }
+        )
     except Exception as e:
         logger.warning(f"signal_from_payload failed: {e!r} payload={payload!r}")
         return None
@@ -155,16 +167,16 @@ async def dispatcher_loop(
                 # pull flag that the monitor loop reads as exit_eval
                 # trigger #0. Reference: Strategy.md §5 (decision logic) +
                 # `state/keys.py::orders_exit_pull`.
-                intent_value = (
-                    sig.intent.value if hasattr(sig.intent, "value") else str(sig.intent)
-                )
+                intent_value = sig.intent.value if hasattr(sig.intent, "value") else str(sig.intent)
                 if intent_value == "MANUAL_EXIT":
                     cur_pos_id_raw = await redis_async.get(  # type: ignore[misc]
-                        K.strategy_current_position_id(sig.index)
+                        K.vessel_current_position_id(sig.strategy_id, sig.index)
                     )
                     cur_pos_id = _decode(cur_pos_id_raw)
                     if cur_pos_id:
-                        flag_value = f"STRATEGY_EXIT:{(payload.get('reason') or 'strategy_request')[:120]}"
+                        flag_value = (
+                            f"STRATEGY_EXIT:{(payload.get('reason') or 'strategy_request')[:120]}"
+                        )
                         await redis_async.set(K.orders_exit_pull(cur_pos_id), flag_value)  # type: ignore[misc]
                         log.info(
                             f"exit_pull set for pos={cur_pos_id} idx={sig.index} sig={sig.sig_id}"

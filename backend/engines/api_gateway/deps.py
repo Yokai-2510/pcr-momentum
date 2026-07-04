@@ -51,4 +51,3 @@ def require_admin(user: UserContext = Depends(get_current_user)) -> UserContext:
     if user.role != "admin":
         raise APIError(403, "FORBIDDEN", "Admin role required")
     return user
-

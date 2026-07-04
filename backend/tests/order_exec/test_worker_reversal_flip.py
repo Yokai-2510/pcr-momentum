@@ -66,23 +66,36 @@ def _seed_for_flip(redis: Any, prior: Position) -> None:
         "23000": {
             "ce": {
                 "token": prior.instrument_token,
-                "ltp": 110.0, "bid": 109.5, "ask": 110.5,
-                "bid_qty": 1500, "ask_qty": 1500, "vol": 0, "oi": 0, "ts": 1,
+                "ltp": 110.0,
+                "bid": 109.5,
+                "ask": 110.5,
+                "bid_qty": 1500,
+                "ask_qty": 1500,
+                "vol": 0,
+                "oi": 0,
+                "ts": 1,
             },
             "pe": None,
         }
     }
     redis.set(K.market_data_index_option_chain(prior.index), orjson.dumps(chain))
-    redis.set(K.STRATEGY_CONFIGS_EXECUTION, orjson.dumps({
-        "buffer_inr": 2.0, "eod_buffer_inr": 5.0,
-        "liquidity_exit_suppress_after": "15:00",
-    }))
+    redis.set(
+        K.STRATEGY_CONFIGS_EXECUTION,
+        orjson.dumps(
+            {
+                "buffer_inr": 2.0,
+                "eod_buffer_inr": 5.0,
+                "liquidity_exit_suppress_after": "15:00",
+            }
+        ),
+    )
     # Persist position HASH + membership.
     redis.hset(
         K.orders_position(prior.pos_id),
         mapping={
             k: (
-                orjson.dumps(v).decode() if isinstance(v, dict | list)
+                orjson.dumps(v).decode()
+                if isinstance(v, dict | list)
                 else (v.isoformat() if isinstance(v, datetime) else str(v))
             )
             for k, v in prior.model_dump(mode="json").items()
@@ -91,15 +104,22 @@ def _seed_for_flip(redis: Any, prior: Position) -> None:
     )
     redis.sadd(K.ORDERS_POSITIONS_OPEN, prior.pos_id)
     redis.sadd(K.orders_positions_open_by_index(prior.index), prior.pos_id)
-    redis.set(K.strategy_current_position_id(prior.index), prior.pos_id)
+    redis.set(K.vessel_current_position_id("bid_ask_imbalance_v1", prior.index), prior.pos_id)
 
 
 @pytest.fixture
 def patched_cleanup_lua(monkeypatch: pytest.MonkeyPatch) -> None:
     from engines.order_exec import cleanup as cleanup_mod
 
-    def _stub_cleanup(redis_sync: Any, *, pos_id: str, sig_id: str,
-                     order_ids: list[str], index: str) -> int:
+    def _stub_cleanup(
+        redis_sync: Any,
+        *,
+        pos_id: str,
+        sig_id: str,
+        order_ids: list[str],
+        strategy_id: str,
+        index: str,
+    ) -> int:
         pipe = redis_sync.pipeline()
         pipe.delete(K.orders_position(pos_id))
         pipe.delete(K.orders_status(pos_id))
@@ -110,7 +130,7 @@ def patched_cleanup_lua(monkeypatch: pytest.MonkeyPatch) -> None:
         pipe.srem(K.ORDERS_POSITIONS_OPEN, pos_id)
         pipe.srem(K.orders_positions_open_by_index(index), pos_id)
         pipe.sadd(K.ORDERS_POSITIONS_CLOSED_TODAY, pos_id)
-        pipe.delete(K.strategy_current_position_id(index))
+        pipe.delete(K.vessel_current_position_id("bid_ask_imbalance_v1", index))
         pipe.execute()
         return 1
 
@@ -136,9 +156,15 @@ def test_close_existing_position_for_flip_closes_prior(
     _seed_for_flip(fake_redis_sync, prior)
 
     from loguru import logger
+
     log = logger.bind(engine="test")
     ok = worker._close_existing_position_for_flip(
-        fake_redis_sync, prior.index, mode="paper", access_token="", log=log,
+        fake_redis_sync,
+        "bid_ask_imbalance_v1",
+        prior.index,
+        mode="paper",
+        access_token="",
+        log=log,
     )
     assert ok is True
 
@@ -146,15 +172,23 @@ def test_close_existing_position_for_flip_closes_prior(
     assert not fake_redis_sync.sismember(K.ORDERS_POSITIONS_OPEN, prior.pos_id)
     assert fake_redis_sync.sismember(K.ORDERS_POSITIONS_CLOSED_TODAY, prior.pos_id)
     # current_position_id pointer wiped.
-    assert fake_redis_sync.get(K.strategy_current_position_id(prior.index)) in (None, "")
+    assert fake_redis_sync.get(
+        K.vessel_current_position_id("bid_ask_imbalance_v1", prior.index)
+    ) in (None, "")
     # Report buffered for Background to drain.
     assert fake_redis_sync.llen(K.ORDERS_REPORTS_PENDING) >= 1
 
 
 def test_close_existing_no_op_when_no_current_position(fake_redis_sync: Any) -> None:
     from loguru import logger
+
     log = logger.bind(engine="test")
     ok = worker._close_existing_position_for_flip(
-        fake_redis_sync, "nifty50", mode="paper", access_token="", log=log,
+        fake_redis_sync,
+        "bid_ask_imbalance_v1",
+        "nifty50",
+        mode="paper",
+        access_token="",
+        log=log,
     )
     assert ok is True  # nothing to close → still success

@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -82,12 +82,13 @@ def encrypt_json(data: dict[str, Any]) -> bytes:
 
 def decrypt_json(blob: bytes) -> dict[str, Any]:
     """Decrypt *blob* and parse JSON."""
-    return json.loads(decrypt_blob(blob).decode("utf-8"))
+    return cast("dict[str, Any]", json.loads(decrypt_blob(blob).decode("utf-8")))
 
 
 # ---------------------------------------------------------------------------
 # Postgres CRUD
 # ---------------------------------------------------------------------------
+
 
 async def read_credentials(
     pool_or_conn: asyncpg.Pool | asyncpg.Connection,
@@ -140,12 +141,13 @@ async def delete_credentials(
             result = await conn.execute(sql, broker)
     else:
         result = await pool_or_conn.execute(sql, broker)
-    return result == "DELETE 1"
+    return bool(result == "DELETE 1")
 
 
 # ---------------------------------------------------------------------------
 # Redis sync
 # ---------------------------------------------------------------------------
+
 
 def _redis_key(broker: str) -> str:
     if broker == "upstox":
@@ -170,6 +172,7 @@ async def delete_from_redis(redis: Any, broker: str) -> None:
 # ---------------------------------------------------------------------------
 # Masking (for GET /credentials/upstox)
 # ---------------------------------------------------------------------------
+
 
 def mask_value(value: str | None, keep: int = 4) -> str | None:
     """Mask a string, revealing only the last *keep* characters.
@@ -204,9 +207,7 @@ def mask_credentials(data: dict[str, Any]) -> dict[str, Any]:
             out[field] = mask_value(out[field])
     if "mobile_no" in out and isinstance(out["mobile_no"], str):
         mn = out["mobile_no"]
-        out["mobile_no"] = (
-            f"{'*' * max(0, len(mn) - 4)}{mn[-4:]}" if len(mn) > 4 else "****"
-        )
+        out["mobile_no"] = f"{'*' * max(0, len(mn) - 4)}{mn[-4:]}" if len(mn) > 4 else "****"
     return out
 
 
@@ -229,6 +230,7 @@ def validate_upstox_payload(data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Convenience: full round-trip
 # ---------------------------------------------------------------------------
+
 
 async def persist_credentials(
     pool_or_conn: asyncpg.Pool | asyncpg.Connection,
@@ -267,6 +269,7 @@ async def clear_credentials(
 # Bootstrap from local JSON file (one-off operator script)
 # ---------------------------------------------------------------------------
 
+
 def read_local_credentials_file(path: str = "credentials.json") -> dict[str, Any] | None:
     """Read the local (git-ignored) ``credentials.json`` and return the
     ``upstox`` entry if present.
@@ -276,9 +279,9 @@ def read_local_credentials_file(path: str = "credentials.json") -> dict[str, Any
     """
     if not os.path.isfile(path):
         return None
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
-    return raw.get("upstox")
+    return cast("dict[str, Any] | None", raw.get("upstox"))
 
 
 async def bootstrap_from_file(
@@ -301,6 +304,7 @@ async def bootstrap_from_file(
 # ---------------------------------------------------------------------------
 # Init-engine / hydrator helpers
 # ---------------------------------------------------------------------------
+
 
 async def hydrate_credentials_to_redis(
     pool_or_conn: asyncpg.Pool | asyncpg.Connection,
@@ -340,6 +344,7 @@ async def init_engine_load_credentials(
 # Test injection helpers
 # ---------------------------------------------------------------------------
 
+
 def set_test_encryption_key(key_b64: str) -> None:
     """Override the encryption key for tests."""
     global _test_key
@@ -356,10 +361,11 @@ def reset_test_encryption_key() -> None:
 # Standalone CLI entrypoint (async)
 # ---------------------------------------------------------------------------
 
+
 async def _cli_main() -> int:
     """Read ``credentials.json`` and upsert into Postgres + Redis."""
-    from state.postgres_client import init_pool, get_pool
-    from state.redis_client import init_pools, get_redis
+    from state.postgres_client import get_pool, init_pool
+    from state.redis_client import get_redis, init_pools
 
     init_pools()
     await init_pool()

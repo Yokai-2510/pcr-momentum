@@ -68,18 +68,16 @@ def _round_trip(model: object) -> object:
 def _signal() -> Signal:
     return Signal(
         sig_id="nifty50_1",
+        strategy_id="bid_ask_imbalance_v1",
+        instrument_id="nifty50",
         index="nifty50",
         side="CE",
         strike=24500,
         instrument_token="NSE_FO|49520",
         intent=SignalIntent.FRESH_ENTRY,
         qty_lots=1,
-        diff_at_signal=12.5,
-        sum_ce_at_signal=120.0,
-        sum_pe_at_signal=85.0,
-        delta_at_signal=-35.0,
-        delta_pcr_at_signal=0.92,
-        strategy_version="abc1234",
+        decision_ts=1782634200000,
+        metrics_at_signal={"sum_ce": 120.0, "sum_pe": 85.0, "delta": -35.0},
         ts=datetime(2026, 4, 28, 9, 20, tzinfo=UTC),
     )
 
@@ -88,21 +86,20 @@ def test_signal_round_trip() -> None:
     _round_trip(_signal())
 
 
-def test_signal_rejects_bad_index() -> None:
+def test_signal_rejects_empty_instrument() -> None:
+    # instrument_id is free-form (stock universes allowed) but never empty.
     with pytest.raises(ValidationError):
         Signal(
             sig_id="x",
-            index="sensex",  # type: ignore[arg-type]
+            strategy_id="bid_ask_imbalance_v1",
+            instrument_id="",
+            index="",
             side="CE",
             strike=1,
             instrument_token="t",
             intent=SignalIntent.FRESH_ENTRY,
             qty_lots=1,
-            diff_at_signal=0,
-            sum_ce_at_signal=0,
-            sum_pe_at_signal=0,
-            delta_at_signal=0,
-            strategy_version="x",
+            decision_ts=1,
             ts=datetime.now(UTC),
         )
 

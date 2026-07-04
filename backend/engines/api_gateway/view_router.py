@@ -21,8 +21,11 @@ def view_key(view: str) -> str:
         return K.UI_VIEW_HEALTH
     if view == "configs":
         return K.UI_VIEW_CONFIGS
-    if view.startswith("strategy:"):
-        return K.ui_view_strategy(view.split(":", 1)[1])
+    if view.startswith("vessels:"):
+        # view name: "vessels:{strategy_id}:{instrument}"
+        _, _, rest = view.partition(":")
+        sid, _, instrument = rest.partition(":")
+        return K.ui_view_vessel(sid, instrument)
     if view.startswith("position:"):
         return K.ui_view_position(view.split(":", 1)[1])
     if view.startswith("delta_pcr:"):
@@ -76,4 +79,3 @@ async def snapshot(redis: Any, views: list[str]) -> dict[str, Any]:
         pipe.get(view_key(view))
     raws = await pipe.execute()
     return {view: json_loads_maybe(raw, None) for view, raw in zip(valid, raws, strict=True)}
-

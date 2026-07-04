@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
-class ActionKind(str, enum.Enum):
+class ActionKind(enum.StrEnum):
     NO_OP = "NO_OP"
     ENTER = "ENTER"
     HOLD = "HOLD"
@@ -59,8 +59,8 @@ class VesselContext:
 
     strategy_id: str
     instrument_id: str
-    strategy_config: dict[str, Any]      # strategy:configs:strategies:{sid}
-    instrument_config: dict[str, Any]    # strategy:configs:strategies:{sid}:instruments:{idx}
+    strategy_config: dict[str, Any]  # strategy:configs:strategies:{sid}
+    instrument_config: dict[str, Any]  # strategy:configs:strategies:{sid}:instruments:{idx}
 
 
 class Strategy(Protocol):

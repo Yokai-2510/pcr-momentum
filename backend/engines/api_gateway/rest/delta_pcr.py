@@ -87,4 +87,3 @@ async def put_delta_pcr_mode(
         orjson.dumps({"event": "delta_pcr_mode", "index": index, "mode": payload.mode}),
     )
     return {"ok": True, "index": index, "mode": payload.mode}
-

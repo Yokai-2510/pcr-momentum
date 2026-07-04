@@ -94,4 +94,3 @@ async def stream(websocket: WebSocket) -> None:
     finally:
         await pubsub.unsubscribe(K.UI_PUB_VIEW)
         await pubsub.close()
-

@@ -96,8 +96,10 @@ def _read_risk_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _read_index_config(redis_sync: _redis_sync.Redis, index: str) -> dict[str, Any]:
-    raw = redis_sync.get(K.strategy_config_index(index))
+def _read_instrument_config(
+    redis_sync: _redis_sync.Redis, strategy_id: str, index: str
+) -> dict[str, Any]:
+    raw = redis_sync.get(K.strategy_config_instrument(strategy_id, index))
     if not raw:
         return {}
     blob = raw if isinstance(raw, bytes) else raw.encode()
@@ -148,9 +150,7 @@ def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _compute_premium_required(
-    leaf: dict[str, Any], qty_lots: int, lot_size: int
-) -> float:
+def _compute_premium_required(leaf: dict[str, Any], qty_lots: int, lot_size: int) -> float:
     """Reservation premium = qty_lots * lot_size * ask (worst-case fill)."""
     ask = float(leaf.get("ask") or 0)
     if ask <= 0:
@@ -177,7 +177,7 @@ def check_and_reserve(
         # Should be impossible (check() would have caught it); defensive.
         return False, "leaf_missing", 0.0
 
-    idx_cfg = _read_index_config(redis_sync, signal.index)
+    idx_cfg = _read_instrument_config(redis_sync, signal.strategy_id, signal.index)
     lot_size = int(idx_cfg.get("lot_size") or 1)
 
     risk_cfg = _read_risk_config(redis_sync)

@@ -62,7 +62,7 @@ def _imbalance_drop_pct(buffer: StrikeBuffer, lookback: int = 3) -> float | None
 
 def evaluate_reversal(
     *,
-    held_side: str | None,            # "CE" | "PE" | None (when FLAT, evaluating the dominant strike)
+    held_side: str | None,  # "CE" | "PE" | None (when FLAT, evaluating the dominant strike)
     leg: StrikeLeg,
     buffer: StrikeBuffer,
     imbalance_drop_threshold_pct: float = 30.0,
@@ -87,7 +87,8 @@ def evaluate_reversal(
     )
     history = buffer.last_n(lookback_ticks + 1)
     was_clear = any(
-        h.ask_wall_present is False or h.ask_wall_present is None for h in history[: max(1, lookback_ticks)]
+        h.ask_wall_present is False or h.ask_wall_present is None
+        for h in history[: max(1, lookback_ticks)]
     )
     wall_blocking = wall_state in ("HOLDING", "REFRESHING")
     wall_just_formed = wall_blocking and was_clear

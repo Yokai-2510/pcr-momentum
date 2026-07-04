@@ -9,7 +9,7 @@ Strategy.md is the spec. Module map:
   state.py              vessel state machine helpers
 
   metrics/              the 8 atomic metrics (Strategy.md §4)
-  decisions/            entry gates, continuation, reversal, timing (§5–§6)
+  decisions/            entry gates, continuation, reversal, timing (§5-§6)
 """
 
 from engines.strategy.strategies.bid_ask_imbalance.strategy import (
@@ -18,4 +18,4 @@ from engines.strategy.strategies.bid_ask_imbalance.strategy import (
 
 STRATEGY_ID = "bid_ask_imbalance_v1"
 
-__all__ = ["BidAskImbalanceStrategy", "STRATEGY_ID"]
+__all__ = ["STRATEGY_ID", "BidAskImbalanceStrategy"]

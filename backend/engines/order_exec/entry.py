@@ -63,9 +63,7 @@ def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _read_leaf(
-    redis_sync: _redis_sync.Redis, index: str, token: str
-) -> dict[str, Any] | None:
+def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
     raw = redis_sync.get(K.market_data_index_option_chain(index))
     if not raw:
         return None
@@ -140,9 +138,7 @@ def submit_and_monitor_paper(
         },
     ]
 
-    log.info(
-        f"entry[paper]: filled {qty} @ ₹{fill_price} (ask={ask:.2f} buffer={buffer_inr})"
-    )
+    log.info(f"entry[paper]: filled {qty} @ ₹{fill_price} (ask={ask:.2f} buffer={buffer_inr})")
     return EntryResult(
         filled_qty=qty,
         avg_fill_price=fill_price,
@@ -180,18 +176,20 @@ def submit_and_monitor_live(
     qty = signal.qty_lots * lot_size
 
     submit_ts = _now_ts_ms()
-    res = UpstoxAPI.place_order({
-        "instrument_token": signal.instrument_token,
-        "quantity": qty,
-        "transaction_type": "BUY",
-        "access_token": access_token,
-        "price": submit_price,
-        "order_type": "LIMIT",
-        "product": "I",
-        "validity": "DAY",
-        "tag": pos_id,
-        "slice": True,
-    })
+    res = UpstoxAPI.place_order(
+        {
+            "instrument_token": signal.instrument_token,
+            "quantity": qty,
+            "transaction_type": "BUY",
+            "access_token": access_token,
+            "price": submit_price,
+            "order_type": "LIMIT",
+            "product": "I",
+            "validity": "DAY",
+            "tag": pos_id,
+            "slice": True,
+        }
+    )
     if not res["success"]:
         log.warning(f"entry[live]: place_order rejected: {res['error']}")
         return EntryResult(0, 0.0, "", abandon_reason=f"place_rejected:{res['error']}")
@@ -235,23 +233,30 @@ def submit_and_monitor_live(
                 if cur_ask > 0 and cur_ask - initial_ask >= chase_ceiling:
                     UpstoxAPI.cancel_order({"order_id": order_id, "access_token": access_token})
                     return EntryResult(
-                        0, 0.0, order_id, events,
+                        0,
+                        0.0,
+                        order_id,
+                        events,
                         abandon_reason=f"chase_ceiling_breached:{cur_ask:.2f}",
                     )
                 if cur_ask > 0 and cur_ask - initial_ask >= drift_threshold:
                     new_price = round(cur_ask + buffer_inr, 2)
-                    UpstoxAPI.modify_order({
-                        "order_id": order_id,
-                        "access_token": access_token,
-                        "price": new_price,
-                    })
+                    UpstoxAPI.modify_order(
+                        {
+                            "order_id": order_id,
+                            "access_token": access_token,
+                            "price": new_price,
+                        }
+                    )
                     initial_ask = cur_ask
-                    events.append({
-                        "ts": datetime.now(UTC).isoformat(),
-                        "event_type": "MODIFY",
-                        "order_id": order_id,
-                        "price": new_price,
-                    })
+                    events.append(
+                        {
+                            "ts": datetime.now(UTC).isoformat(),
+                            "event_type": "MODIFY",
+                            "order_id": order_id,
+                            "price": new_price,
+                        }
+                    )
             continue
         for _stream, entries in resp:
             for entry_id, fields in entries:
@@ -269,7 +274,10 @@ def submit_and_monitor_live(
                     last_partial_seen_ts = time.time()
                 elif event_type == "REJECT":
                     return EntryResult(
-                        0, 0.0, order_id, events,
+                        0,
+                        0.0,
+                        order_id,
+                        events,
                         abandon_reason=f"broker_reject:{payload.get('reject_reason')}",
                     )
         if fill_ts is not None:
@@ -282,7 +290,11 @@ def submit_and_monitor_live(
     if filled_qty == 0:
         UpstoxAPI.cancel_order({"order_id": order_id, "access_token": access_token})
         return EntryResult(
-            0, 0.0, order_id, events, abandon_reason="open_timeout",
+            0,
+            0.0,
+            order_id,
+            events,
+            abandon_reason="open_timeout",
         )
 
     return EntryResult(

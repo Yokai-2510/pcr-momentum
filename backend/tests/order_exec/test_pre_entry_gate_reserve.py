@@ -22,18 +22,16 @@ from state.schemas.signal import Signal
 def _signal(token: str = "NSE_FO|49520", index: str = "nifty50") -> Signal:
     return Signal(
         sig_id="abc123",
+        strategy_id="bid_ask_imbalance_v1",
+        instrument_id=index,
         index=index,
         side="CE",
         strike=23000,
         instrument_token=token,
         intent="FRESH_ENTRY",
         qty_lots=1,
-        diff_at_signal=10.0,
-        sum_ce_at_signal=20.0,
-        sum_pe_at_signal=0.0,
-        delta_at_signal=-20.0,
-        delta_pcr_at_signal=None,
-        strategy_version="t",
+        decision_ts=int(datetime.now(UTC).timestamp() * 1000),
+        metrics_at_signal={"sum_ce": 20.0, "sum_pe": 0.0, "delta": -20.0},
         ts=datetime.now(UTC),
     )
 
@@ -51,8 +49,15 @@ def _seed_chain(
     chain = {
         "23000": {
             "ce": {
-                "token": token, "ltp": ltp, "bid": bid, "ask": ask,
-                "bid_qty": 1500, "ask_qty": ask_qty, "vol": 0, "oi": 0, "ts": 1,
+                "token": token,
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "bid_qty": 1500,
+                "ask_qty": ask_qty,
+                "vol": 0,
+                "oi": 0,
+                "ts": 1,
             },
             "pe": None,
         }
@@ -73,14 +78,16 @@ def _seed_full_world(
     redis.set(K.STRATEGY_CONFIGS_EXECUTION, orjson.dumps({"spread_skip_pct": 0.05}))
     redis.set(
         K.STRATEGY_CONFIGS_RISK,
-        orjson.dumps({
-            "trading_capital_inr": trading_capital_inr,
-            "max_concurrent_positions": max_concurrent_positions,
-            "daily_loss_circuit_pct": 0.08,
-        }),
+        orjson.dumps(
+            {
+                "trading_capital_inr": trading_capital_inr,
+                "max_concurrent_positions": max_concurrent_positions,
+                "daily_loss_circuit_pct": 0.08,
+            }
+        ),
     )
     redis.set(
-        K.strategy_config_index("nifty50"),
+        K.strategy_config_instrument("bid_ask_imbalance_v1", "nifty50"),
         orjson.dumps({"index": "nifty50", "lot_size": lot_size}),
     )
 
@@ -101,7 +108,7 @@ def test_check_and_reserve_blocks_when_no_risk_config(fake_redis_sync: Any) -> N
     fake_redis_sync.set(K.system_flag_engine_up("order_exec"), "true")
     fake_redis_sync.set(K.STRATEGY_CONFIGS_EXECUTION, orjson.dumps({"spread_skip_pct": 0.05}))
     fake_redis_sync.set(
-        K.strategy_config_index("nifty50"),
+        K.strategy_config_instrument("bid_ask_imbalance_v1", "nifty50"),
         orjson.dumps({"index": "nifty50", "lot_size": 75}),
     )
     _seed_chain(fake_redis_sync, "nifty50", "NSE_FO|49520", ltp=100, bid=99, ask=101)

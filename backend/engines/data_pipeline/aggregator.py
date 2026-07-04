@@ -126,7 +126,7 @@ async def flush_spot(redis: _redis_async.Redis, index: str, spot: dict[str, Any]
     if not spot:
         return
     mapping = {k: (str(v) if not isinstance(v, int | float) else v) for k, v in spot.items()}
-    await redis.hset(K.market_data_index_spot(index), mapping=mapping)  # type: ignore[misc]
+    await redis.hset(K.market_data_index_spot(index), mapping=mapping)  # type: ignore[arg-type]
 
 
 async def update_ws_status(
@@ -142,4 +142,4 @@ async def update_ws_status(
         fields["last_frame_ts"] = last_frame_ts
     if reconnect_count is not None:
         fields["reconnect_count"] = reconnect_count
-    await redis.hset(K.MARKET_DATA_WS_STATUS_MARKET, mapping=fields)  # type: ignore[misc]
+    await redis.hset(K.MARKET_DATA_WS_STATUS_MARKET, mapping=fields)  # type: ignore[arg-type]

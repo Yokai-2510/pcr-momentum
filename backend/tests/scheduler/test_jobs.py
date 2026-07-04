@@ -20,9 +20,7 @@ async def test_market_open_flips_trading_active(fake_redis_async: Any) -> None:
     assert (await fake_redis_async.get(K.SYSTEM_FLAGS_TRADING_ACTIVE)) == "true"
     assert (await fake_redis_async.get(K.SYSTEM_FLAGS_TRADING_DISABLED_REASON)) == "none"
     # Event published.
-    entries = await fake_redis_async.xrevrange(
-        K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1
-    )
+    entries = await fake_redis_async.xrevrange(K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1)
     assert entries
     fields = entries[0][1]
     assert fields["kind"] == "market_open"
@@ -33,9 +31,7 @@ async def test_market_close_flips_trading_active_off(fake_redis_async: Any) -> N
     await fake_redis_async.set(K.SYSTEM_FLAGS_TRADING_ACTIVE, "true")
     await jobs.market_close(fake_redis_async)
     assert (await fake_redis_async.get(K.SYSTEM_FLAGS_TRADING_ACTIVE)) == "false"
-    entries = await fake_redis_async.xrevrange(
-        K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1
-    )
+    entries = await fake_redis_async.xrevrange(K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1)
     assert entries[0][1]["kind"] == "market_close"
 
 
@@ -52,18 +48,14 @@ async def test_daily_reset_clears_freeze_and_publishes(fake_redis_async: Any) ->
     await jobs.daily_reset(fake_redis_async)
     assert (await fake_redis_async.get("system:flags:entry_freeze")) is None
     assert (await fake_redis_async.get("system:flags:eod_squareoff")) is None
-    entries = await fake_redis_async.xrevrange(
-        K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1
-    )
+    entries = await fake_redis_async.xrevrange(K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1)
     assert entries[0][1]["kind"] == "daily_reset"
 
 
 @pytest.mark.asyncio
 async def test_instrument_refresh_publishes_event(fake_redis_async: Any) -> None:
     await jobs.instrument_refresh(fake_redis_async)
-    entries = await fake_redis_async.xrevrange(
-        K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1
-    )
+    entries = await fake_redis_async.xrevrange(K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1)
     assert entries
     assert entries[0][1]["kind"] == "instrument_refresh"
 
@@ -71,7 +63,5 @@ async def test_instrument_refresh_publishes_event(fake_redis_async: Any) -> None
 @pytest.mark.asyncio
 async def test_nightly_maintenance_publishes_event(fake_redis_async: Any) -> None:
     await jobs.nightly_maintenance(fake_redis_async)
-    entries = await fake_redis_async.xrevrange(
-        K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1
-    )
+    entries = await fake_redis_async.xrevrange(K.SYSTEM_STREAM_SCHEDULER_EVENTS, count=1)
     assert entries[0][1]["kind"] == "nightly_maintenance"
