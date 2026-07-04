@@ -25,8 +25,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from engines.strategy.strategies.base import Action, ActionKind, VesselContext
-from engines.strategy.strategies.bid_ask_imbalance.basket import Basket
+from engines.strategy.strategies.base import (
+    Action,
+    ActionKind,
+    MarketView,
+    UniverseUpdate,
+    VesselContext,
+)
+from engines.strategy.strategies.bid_ask_imbalance.basket import Basket, maybe_shift_basket
 from engines.strategy.strategies.bid_ask_imbalance.buffer import BufferStore
 from engines.strategy.strategies.bid_ask_imbalance.decisions import (
     continuation as continuation_mod,
@@ -56,7 +62,13 @@ from engines.strategy.strategies.bid_ask_imbalance.metrics.spread import (
     classify_spread,
     compute_spread,
 )
-from engines.strategy.strategies.bid_ask_imbalance.snapshot import Snapshot, StrikeLeg
+from engines.strategy.strategies.bid_ask_imbalance.snapshot import (
+    Snapshot,
+    StrikeLeg,
+)
+from engines.strategy.strategies.bid_ask_imbalance.snapshot import (
+    build_snapshot as build_snapshot_from_chain,
+)
 
 
 @dataclass(slots=True)
@@ -177,6 +189,89 @@ class BidAskImbalanceStrategy:
         """Drain phase — runner is closing positions. Strategy stops emitting
         new entries; this is a no-op since the runner caps actions in DRAIN."""
         return
+
+    # ── Component hooks (Strategy protocol, Phase A) ─────────────────────
+
+    def create_memory(self, ctx: VesselContext) -> MemoryStore:
+        """Build this strategy's per-vessel memory from config."""
+        strategy_cfg = ctx.strategy_config or {}
+        buffer_capacity = int(((strategy_cfg.get("buffer") or {}).get("ring_size")) or 50)
+        return MemoryStore(
+            buffers=BufferStore(capacity=buffer_capacity),
+            basket=Basket(atm=0),
+            timing_windows=timing_mod.parse_windows(strategy_cfg.get("time_windows") or []),
+        )
+
+    def update_universe(
+        self, ctx: VesselContext, memory: Any, market: MarketView
+    ) -> UniverseUpdate | None:
+        """ATM-window basket policy: follow spot, hysteresis on shifts."""
+        if not isinstance(memory, MemoryStore):
+            return None
+        instrument_cfg = ctx.instrument_config or {}
+        strategy_cfg = ctx.strategy_config or {}
+        strike_step = int(instrument_cfg.get("strike_step", 50))
+        basket_size = int(instrument_cfg.get("basket_size", 5))
+        hysteresis_sec = int(((strategy_cfg.get("atm_shift") or {}).get("hysteresis_sec")) or 5)
+
+        spot = market.spot.get("ltp")
+        transition = maybe_shift_basket(
+            current=memory.basket,
+            spot=spot,
+            strike_step=strike_step,
+            basket_size=basket_size,
+            now_ms=market.now_ms,
+            hysteresis_sec=hysteresis_sec,
+            token_lookup=market.token_lookup,
+        )
+        if transition is None:
+            return None
+        memory.basket = transition.new_basket
+        memory.buffers.discard(transition.dropped_tokens)
+        basket_view = {
+            "atm": transition.new_basket.atm,
+            "ce": [
+                transition.new_basket.ce_tokens.get(s) for s in transition.new_basket.ce_strikes
+            ],
+            "pe": [
+                transition.new_basket.pe_tokens.get(s) for s in transition.new_basket.pe_strikes
+            ],
+        }
+        return UniverseUpdate(
+            subscribe=tuple(transition.added_tokens),
+            unsubscribe=tuple(transition.dropped_tokens),
+            basket_view=basket_view,
+            reason=transition.reason,
+        )
+
+    def build_snapshot(self, ctx: VesselContext, memory: Any, market: MarketView) -> Snapshot:
+        """Build this strategy's own Snapshot type from the market view.
+
+        If a position is held but its strike was dropped from the basket by
+        an ATM shift, the held leg is pinned into the snapshot so the
+        continuation / reversal evaluators keep visibility on it
+        (Strategy.md §3.2 + §5.3).
+        """
+        assert isinstance(memory, MemoryStore)
+        return build_snapshot_from_chain(
+            instrument_id=ctx.instrument_id,
+            atm=memory.basket.atm,
+            basket_ce=memory.basket.ce_pairs(),
+            basket_pe=memory.basket.pe_pairs(),
+            option_chain=market.chain,
+            spot=market.spot,
+            snapshot_ts=market.now_ms,
+            pinned_token=memory.held_token,
+            pinned_side=memory.held_side,
+            pinned_strike=memory.held_strike,
+        )
+
+    def on_config_reload(self, ctx: VesselContext, memory: Any) -> None:
+        """Re-derive config-dependent memory (timing windows) after hot reload."""
+        if isinstance(memory, MemoryStore):
+            memory.timing_windows = timing_mod.parse_windows(
+                (ctx.strategy_config or {}).get("time_windows") or []
+            )
 
     def on_tick(self, ctx: VesselContext, snapshot: Any, memory: Any) -> Action:
         if not isinstance(snapshot, Snapshot) or not isinstance(memory, MemoryStore):

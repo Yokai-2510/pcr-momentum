@@ -2,23 +2,28 @@
 Vessel runner — one async task per (strategy_id, instrument_id) pair.
 
 Owns ALL Redis I/O:
-  - reads option_chain + spot -> builds Snapshot
+  - reads option_chain + spot + meta -> builds a MarketView
+  - asks the strategy for universe updates (basket shifts / subscriptions)
+  - asks the strategy to build ITS OWN snapshot type from the MarketView
   - calls strategy.on_tick(ctx, snapshot, memory) -> Action
   - writes per-tick decision telemetry (Strategy.md §11.1)
   - applies state transitions
   - calls publisher.emit_signal(...) on actionable Actions
-  - updates basket subscriptions when ATM shifts
 
-The runner is generic — the same code drives every Strategy implementation.
-What varies between strategies is the Strategy class injected into the
-runner; the runner doesn't care.
+The runner is GENERIC — it imports no concrete strategy code. Everything
+strategy-specific (snapshot schema, memory layout, metric names, basket
+policy) lives behind the Strategy protocol hooks:
+
+    create_memory / update_universe / build_snapshot / on_tick / on_config_reload
 
 Loop shape (Strategy.md §2.3 — event-driven, no artificial floor):
 
     while True:
         await dirty.wait()         # blocks at OS level when idle
         dirty.clear()              # reset BEFORE reading state
-        snapshot = build_snapshot()
+        market = read_market_view()
+        apply(strategy.update_universe(ctx, memory, market))
+        snapshot = strategy.build_snapshot(ctx, memory, market)
         action = strategy.on_tick(ctx, snapshot, memory)
         await persist_metrics(action)
         await apply_action(action)
@@ -42,21 +47,13 @@ from engines.strategy import publisher
 from engines.strategy.ingestion import TickRouter
 from engines.strategy.observability import decision_log
 from engines.strategy.registry import VesselSpec, reload_vessel_config
-from engines.strategy.strategies.base import Action, ActionKind
-from engines.strategy.strategies.bid_ask_imbalance.basket import (
-    Basket,
-    maybe_shift_basket,
-)
-from engines.strategy.strategies.bid_ask_imbalance.buffer import BufferStore
-from engines.strategy.strategies.bid_ask_imbalance.decisions import timing as timing_mod
-from engines.strategy.strategies.bid_ask_imbalance.snapshot import build_snapshot
-from engines.strategy.strategies.bid_ask_imbalance.state import (
+from engines.strategy.strategies.base import Action, ActionKind, MarketView, VesselMemory
+from engines.strategy.vessel_state import (
     is_enabled,
     maybe_exit_cooldown,
     read_state,
     set_state,
 )
-from engines.strategy.strategies.bid_ask_imbalance.strategy import MemoryStore
 from state import keys as K
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -127,6 +124,20 @@ def _build_token_lookup(
     return _lookup
 
 
+def _read_market_view(redis_sync: Any, index: str) -> MarketView:
+    """One consistent read of everything the strategy hooks may need."""
+    chain = _read_json(redis_sync, K.market_data_index_option_chain(index)) or {}
+    spot = _read_spot_hash(redis_sync, index)
+    meta = _read_meta(redis_sync, index)
+    return MarketView(
+        chain=chain,
+        spot=spot,
+        meta=meta,
+        now_ms=int(time.time() * 1000),
+        token_lookup=_build_token_lookup(meta, chain),
+    )
+
+
 async def _persist_metrics_and_decision(
     redis_async: _redis_async.Redis,
     *,
@@ -134,10 +145,14 @@ async def _persist_metrics_and_decision(
     instrument_id: str,
     action: Action,
 ) -> None:
-    """Write the last_decision telemetry block + per-strike/cumulative metrics.
+    """Write the last_decision telemetry block + strategy metrics.
 
     Always called (Strategy.md §5.1: every tick produces a logged decision,
     even NO_OP). This is what makes silent-loop bugs detectable.
+
+    Metric names are strategy-defined. The full metrics blob is written to
+    the vessel's `metrics:latest` key; a few well-known names additionally
+    land on their dedicated keys so existing dashboards keep working.
     """
     metrics = action.metrics or {}
     ts_ms = int(time.time() * 1000)
@@ -156,6 +171,13 @@ async def _persist_metrics_and_decision(
     pipe.set(K.vessel_metrics_last_decision(sid, instrument_id), orjson.dumps(last_decision))
     pipe.set(K.vessel_metrics_last_decision_ts(sid, instrument_id), str(ts_ms))
 
+    if metrics:
+        pipe.set(
+            K.vessel_metrics_latest(sid, instrument_id),
+            orjson.dumps(metrics, default=str),
+        )
+
+    # Well-known metric names -> dedicated keys (UI views read these).
     if metrics.get("net_pressure") is not None:
         pipe.set(K.vessel_metrics_net_pressure(sid, instrument_id), str(metrics["net_pressure"]))
     if metrics.get("cum_ce_imbalance") is not None:
@@ -177,13 +199,11 @@ async def _apply_action(
     *,
     spec: VesselSpec,
     action: Action,
-    memory: MemoryStore,
+    memory: VesselMemory,
 ) -> None:
     """Translate Action into state mutations + signal emission."""
     sid = spec.strategy_id
     idx = spec.instrument_id
-    int(spec.context.instrument_config.get("post_sl_cooldown_sec", 60))
-    int(spec.context.instrument_config.get("post_reversal_cooldown_sec", 90))
     suppress_sec = int(
         (spec.context.strategy_config.get("reversal", {}) or {}).get("suppress_sec", 30)
     )
@@ -233,20 +253,7 @@ async def vessel_loop(
 
     # ── Prepare phase ────────────────────────────────────────────────────
     spec.strategy.prepare(spec.context)
-
-    instrument_cfg = spec.context.instrument_config or {}
-    strategy_cfg = spec.context.strategy_config or {}
-
-    strike_step = int(instrument_cfg.get("strike_step", 50))
-    basket_size = int(instrument_cfg.get("basket_size", 5))
-    hysteresis_sec = int(((strategy_cfg.get("atm_shift") or {}).get("hysteresis_sec")) or 5)
-    buffer_capacity = int(((strategy_cfg.get("buffer") or {}).get("ring_size")) or 50)
-
-    memory = MemoryStore(
-        buffers=BufferStore(capacity=buffer_capacity),
-        basket=Basket(atm=0),
-        timing_windows=timing_mod.parse_windows(strategy_cfg.get("time_windows") or []),
-    )
+    memory: VesselMemory = spec.strategy.create_memory(spec.context)
 
     # Initialize state to FLAT if nothing in Redis yet
     set_state(redis_sync, sid, idx, read_state(redis_sync, sid, idx))
@@ -270,67 +277,30 @@ async def vessel_loop(
 
     spec.strategy.on_pre_open(spec.context)
 
-    # ── Initial basket build ─────────────────────────────────────────────
-    last_basket_check_ms = 0
-
-    async def ensure_basket() -> None:
-        nonlocal last_basket_check_ms
-        now_ms = int(time.time() * 1000)
-        # Re-read instruments + spot fresh on every basket-check.
-        spot_hash = _read_spot_hash(redis_sync, idx)
-        chain = _read_json(redis_sync, K.market_data_index_option_chain(idx)) or {}
-        spot = spot_hash.get("ltp")
-        token_lookup = _build_token_lookup(_read_meta(redis_sync, idx), chain)
-        transition = maybe_shift_basket(
-            current=memory.basket,
-            spot=spot,
-            strike_step=strike_step,
-            basket_size=basket_size,
-            now_ms=now_ms,
-            hysteresis_sec=hysteresis_sec,
-            token_lookup=token_lookup,
-        )
-        if transition is None:
+    # ── Universe maintenance (strategy-owned subscription policy) ────────
+    async def ensure_universe(market: MarketView) -> None:
+        update = spec.strategy.update_universe(spec.context, memory, market)
+        if update is None:
             return
-        # Apply transition.
-        memory.basket = transition.new_basket
-        memory.buffers.discard(transition.dropped_tokens)
-        # Update vessel basket key.
-        redis_sync.set(
-            K.vessel_basket(sid, idx),
-            orjson.dumps(
-                {
-                    "atm": transition.new_basket.atm,
-                    "ce": [
-                        transition.new_basket.ce_tokens.get(s)
-                        for s in transition.new_basket.ce_strikes
-                    ],
-                    "pe": [
-                        transition.new_basket.pe_tokens.get(s)
-                        for s in transition.new_basket.pe_strikes
-                    ],
-                }
-            ),
-        )
-        # Update subscriptions
-        for tok in transition.added_tokens:
+        if update.basket_view is not None:
+            redis_sync.set(K.vessel_basket(sid, idx), orjson.dumps(update.basket_view))
+        for tok in update.subscribe:
             redis_sync.sadd(K.MARKET_DATA_SUBSCRIPTIONS_DESIRED, tok)
             router.register(tok, dirty)
-        for tok in transition.dropped_tokens:
+        for tok in update.unsubscribe:
             router.unregister(tok, dirty)
         await router.reconcile()
         log.info(
-            f"basket: {transition.reason} added={len(transition.added_tokens)} "
-            f"dropped={len(transition.dropped_tokens)} atm={transition.new_basket.atm}"
+            f"universe: {update.reason} subscribe={len(update.subscribe)} "
+            f"unsubscribe={len(update.unsubscribe)}"
         )
-        last_basket_check_ms = now_ms
 
-    await ensure_basket()
+    await ensure_universe(_read_market_view(redis_sync, idx))
 
     # ── LIVE loop ────────────────────────────────────────────────────────
     config_reload_at = time.time() + 60.0  # reload config every 60s
     while not shutdown.is_set():
-        # Wait for a tick on any of our basket tokens.
+        # Wait for a tick on any of our subscribed tokens.
         # Idle wakeups (timeout) still run the session-end / cooldown /
         # config-reload checks below.
         with contextlib.suppress(TimeoutError):
@@ -398,34 +368,19 @@ async def vessel_loop(
         # Periodic config hot-reload (Strategy.md §10.3).
         if time.time() >= config_reload_at:
             reload_vessel_config(redis_sync, spec)
-            memory.timing_windows = timing_mod.parse_windows(
-                (spec.context.strategy_config or {}).get("time_windows") or []
-            )
+            spec.strategy.on_config_reload(spec.context, memory)
             config_reload_at = time.time() + 60.0
 
-        # Periodic basket re-check (every 1 s of wall time, regardless of dirty).
-        if int(time.time() * 1000) - last_basket_check_ms > 1000:
-            await ensure_basket()
+        # One consistent market read per evaluation; shared by the universe
+        # check and the snapshot build (no double Redis round-trip).
+        market = _read_market_view(redis_sync, idx)
 
-        # Build snapshot. If a position is held but its strike has been
-        # dropped from the basket by an ATM shift, pin it into the snapshot
-        # so continuation / reversal evaluators have visibility on the
-        # held leg (Strategy.md §3.2 + §5.3).
-        ts_ms = int(time.time() * 1000)
-        chain = _read_json(redis_sync, K.market_data_index_option_chain(idx)) or {}
-        spot_hash = _read_spot_hash(redis_sync, idx)
-        snapshot = build_snapshot(
-            instrument_id=idx,
-            atm=memory.basket.atm,
-            basket_ce=memory.basket.ce_pairs(),
-            basket_pe=memory.basket.pe_pairs(),
-            option_chain=chain,
-            spot=spot_hash,
-            snapshot_ts=ts_ms,
-            pinned_token=memory.held_token,
-            pinned_side=memory.held_side,
-            pinned_strike=memory.held_strike,
-        )
+        # Universe policy (e.g. ATM shift). Pure compute on the view; the
+        # strategy's own hysteresis keeps this cheap on every tick.
+        await ensure_universe(market)
+
+        # Strategy-defined snapshot.
+        snapshot = spec.strategy.build_snapshot(spec.context, memory, market)
 
         # Strategy decision (pure)
         try:

@@ -1,4 +1,4 @@
-"""Vessel state machine (Strategy.md §5.5).
+"""Vessel state machine (Strategy.md §5.5) — strategy-agnostic.
 
 Per-vessel state lives in Redis under `strategy:{sid}:{idx}:state`. Cooldown
 clock + counters are read from Redis on every evaluation — this is so a
@@ -12,7 +12,9 @@ LIVE                 COOLDOWN         No entries; observe + write metrics
 LIVE                 HALTED           No entries, no exits (drain script handles closure)
 
 Transitions are driven by the runner based on Action returned by the strategy.
-This module just provides typed helpers + Redis I/O for state mutations.
+This module just provides typed helpers + Redis I/O for state mutations. It is
+generic across strategies — every vessel shares the same lifecycle states,
+regardless of what its strategy computes internally.
 """
 
 from __future__ import annotations

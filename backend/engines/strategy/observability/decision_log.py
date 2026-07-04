@@ -18,21 +18,21 @@ from typing import Any
 from loguru import logger
 
 from engines.strategy.strategies.base import Action
-from engines.strategy.strategies.bid_ask_imbalance.snapshot import Snapshot
 
 
 def emit(
     strategy_id: str,
     instrument_id: str,
-    snapshot: Snapshot,
+    snapshot: Any,
     action: Action,
     *,
     state: str,
 ) -> None:
+    # Snapshot types are strategy-defined; read common fields defensively.
     metrics = action.metrics or {}
     summary: dict[str, Any] = {
-        "atm": snapshot.atm,
-        "spot": snapshot.spot,
+        "atm": getattr(snapshot, "atm", None),
+        "spot": getattr(snapshot, "spot", None),
         "net_pressure": metrics.get("net_pressure"),
         "net_pressure_label": metrics.get("net_pressure_label"),
         "cum_ce_imbalance": metrics.get("cum_ce_imbalance"),

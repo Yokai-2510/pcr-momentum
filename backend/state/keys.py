@@ -285,6 +285,13 @@ def vessel_counter_wins(sid: str, index: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def vessel_metrics_latest(sid: str, index: str) -> str:
+    """STRING (JSON) — the FULL strategy-defined metrics blob from the last
+    evaluation. Metric names are strategy-defined (no central schema); this
+    is the generic feed for per-strategy analytics/UI."""
+    return f"{_vessel_prefix(sid, index)}:metrics:latest"
+
+
 def vessel_metrics_per_strike(sid: str, index: str) -> str:
     """STRING (JSON) — map of {token: {imbalance, spread, wall_state, ...}}."""
     return f"{_vessel_prefix(sid, index)}:metrics:per_strike"
