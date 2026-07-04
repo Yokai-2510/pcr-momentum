@@ -93,7 +93,7 @@ Full view-payload schemas in [`API.md`](./API.md) §12.
 |---|---|---|
 | Auth | `/auth/login`, `/auth/refresh`, `/auth/upstox-webhook` | Webhook is public; others require JWT |
 | Credentials | `GET/POST/DELETE /credentials/upstox` | First-boot flow + rotation |
-| Configs | `GET /configs`, `GET/PUT /configs/{section}` | Sections: `execution`, `session`, `risk`, `index:nifty50`, `index:banknifty` |
+| Configs | `GET /configs`, `GET/PUT /configs/{section}` | Sections: `execution`, `session`, `risk`, `strategy:{sid}`, `instrument:{sid}:{idx}` |
 | Strategy | `GET /strategy/status`, `POST /commands/halt_index/{idx}`, `/commands/resume_index/{idx}`, `/commands/global_kill`, `/commands/global_resume` | |
 | Positions | `GET /positions/open`, `/positions/closed_today`, `/positions/history` (paged), `/reports/{id}`, `POST /commands/manual_exit/{id}` | History → Postgres; live → Redis |
 | PnL | `GET /pnl/live`, `/pnl/history` | |

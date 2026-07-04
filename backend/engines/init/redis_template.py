@@ -78,17 +78,17 @@ TEMPLATE: dict[str, dict[str, Any]] = {
     K.MARKET_DATA_WS_STATUS_MARKET: {"type": "hash_empty"},
     K.MARKET_DATA_WS_STATUS_PORTFOLIO: {"type": "hash_empty"},
     # ── orders: allocator + day-counters reset ──────────────────────────
-    # NOTE: deployed + open_count are HASH per index (+ "total" field) — the
-    # capital_allocator_check_and_reserve.lua expects HSET/HGET/HINCRBYFLOAT
-    # operations on these keys. Writing them as STRING causes WRONGTYPE
-    # errors during Lua execution and silently rejects every signal.
+    # NOTE: deployed + open_count are HASHes. Fields are created on demand by
+    # the allocator (HINCRBYFLOAT/HINCRBY) per vessel ("{sid}:{idx}"), per
+    # strategy ("strategy:{sid}"), plus "total". Only "total" is seeded;
+    # writing these as STRING causes WRONGTYPE and rejects every signal.
     K.ORDERS_ALLOCATOR_DEPLOYED: {
         "type": "hash",
-        "value": {"nifty50": "0", "banknifty": "0", "total": "0"},
+        "value": {"total": "0"},
     },
     K.ORDERS_ALLOCATOR_OPEN_COUNT: {
         "type": "hash",
-        "value": {"nifty50": "0", "banknifty": "0", "total": "0"},
+        "value": {"total": "0"},
     },
     K.ORDERS_ALLOCATOR_OPEN_SYMBOLS: {"type": "set_empty"},
     K.ORDERS_POSITIONS_OPEN: {"type": "set_empty"},
@@ -132,6 +132,7 @@ def _vessel_runtime_keys() -> dict[str, dict[str, Any]]:
         out[K.vessel_counter_entries(sid, idx)] = {"type": "str", "value": "0"}
         out[K.vessel_counter_reversals(sid, idx)] = {"type": "str", "value": "0"}
         out[K.vessel_counter_wins(sid, idx)] = {"type": "str", "value": "0"}
+        out[K.vessel_metrics_latest(sid, idx)] = {"type": "json", "value": {}}
         out[K.vessel_metrics_per_strike(sid, idx)] = {"type": "json", "value": {}}
         out[K.vessel_metrics_net_pressure(sid, idx)] = {"type": "str", "value": "0"}
         out[K.vessel_metrics_cum_ce(sid, idx)] = {"type": "str", "value": "0"}

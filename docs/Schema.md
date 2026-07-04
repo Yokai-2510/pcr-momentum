@@ -223,6 +223,7 @@ See Strategy.md §10 for the full config schema.
 #### Per-Vessel Live Metrics (Strategy.md §11.1 — written every tick)
 | Key | Type | Description |
 |---|---|---|
+| `strategy:{sid}:{idx}:metrics:latest` | JSON | FULL strategy-defined metrics blob from the last evaluation (metric names are strategy-defined — no central schema; generic per-strategy analytics feed) |
 | `strategy:{sid}:{idx}:metrics:per_strike` | JSON | `{token: {imbalance, spread, wall_state, aggressor, ltp, ...}}` |
 | `strategy:{sid}:{idx}:metrics:cum_ce_imbalance` | STRING (float) | Σ(CE bid qty) / Σ(CE ask qty) across basket |
 | `strategy:{sid}:{idx}:metrics:cum_pe_imbalance` | STRING (float) | Symmetric for PE |
@@ -233,9 +234,7 @@ See Strategy.md §10 for the full config schema.
 #### Signals (Strategy emits; Order Exec consumes)
 | Key | Type | Description |
 |---|---|---|
-| `strategy:signals:{sig_id}` | JSON | Full signal payload (pydantic Signal model) |
-| `strategy:signals:active` | SET | Currently in-flight sig_ids |
-| `strategy:signals:counter` | STRING | Monotonic counter for sig_id generation |
+| `strategy:signals:{sig_id}` | JSON | Full signal payload (pydantic Signal model). Lives until position cleanup — order-exec rehydrates it when resuming monitors after a restart |
 
 #### Streams
 | Key | Type | Description |
@@ -250,17 +249,19 @@ See Strategy.md §10 for the full config schema.
 #### Capital Allocator (Order Exec writes)
 | Key | Type | Description |
 |---|---|---|
-| `orders:allocator:deployed` | HASH | `{nifty50, banknifty, total}` — premium deployed in rupees |
-| `orders:allocator:open_count` | HASH | `{nifty50, banknifty, total}` — open position counts |
-| `orders:allocator:open_symbols` | SET | Currently in-position indexes |
+| `orders:allocator:deployed` | HASH | Premium deployed in rupees. Fields: `{sid}:{idx}` per vessel, `strategy:{sid}` per-strategy subtotal, `total` global |
+| `orders:allocator:open_count` | HASH | Open position counts, same field scheme as `deployed` |
+| `orders:allocator:open_symbols` | SET | Currently in-position vessels (`{sid}:{idx}` entries) |
+
+Reservation caps (checked atomically, in order): per-vessel single position → strategy `max_parallel_positions` → strategy `capital_inr` → global `max_concurrent_positions` → global `trading_capital_inr`. Per-strategy caps come from the strategy's own config blob; `0`/absent = unlimited within the global envelope.
 
 #### Positions (Order Exec writes)
 | Key | Type | Description |
 |---|---|---|
 | `orders:positions:{pos_id}` | HASH | Full Position state per `state/schemas/position.py` |
 | `orders:positions:open` | SET | All currently-open pos_ids globally |
-| `orders:positions:open_by_index:nifty50` | SET | Open pos_ids for NIFTY (max 1) |
-| `orders:positions:open_by_index:banknifty` | SET | Open pos_ids for BANKNIFTY (max 1) |
+| `orders:positions:open_by_index:nifty50` | SET | Open pos_ids for NIFTY (one per vessel; multiple strategies may each hold one) |
+| `orders:positions:open_by_index:banknifty` | SET | Same for BANKNIFTY |
 | `orders:positions:closed_today` | SET | All pos_ids closed today (cleared by Init) |
 
 #### Orders (Order Exec writes)
@@ -493,7 +494,7 @@ Postgres holds the durable copy; Init mirrors into Redis on every boot.
 
 ```sql
 CREATE TABLE config_settings (
-  key             TEXT PRIMARY KEY,                 -- 'execution', 'session', 'risk', 'index:nifty50', 'index:banknifty'
+  key             TEXT PRIMARY KEY,                 -- 'execution', 'session', 'risk', 'strategy:{sid}', 'instrument:{sid}:{idx}'
   value           JSONB NOT NULL,
   updated_at      TIMESTAMPTZ DEFAULT now(),
   updated_by      UUID REFERENCES user_accounts(id)

@@ -442,7 +442,9 @@ backend/engines/strategy/
 ├── __main__.py                    # python -m engines.strategy
 ├── main.py                        # bootstrap: registry → spawn vessels → wait for shutdown
 │
-├── runner.py                      # StrategyVessel: lifecycle (BOOT / PRE_OPEN / SETTLE / LIVE / DRAIN)
+├── runner.py                      # GENERIC vessel loop — drives any Strategy via protocol hooks;
+│                                  #   imports no concrete strategy code
+├── vessel_state.py                # strategy-agnostic lifecycle state (FLAT/IN_CE/IN_PE/COOLDOWN/HALTED)
 ├── registry.py                    # discover registered strategies + vessel definitions from config
 ├── ingestion.py                   # Redis pub/sub subscriber → fan-out dirty events to vessels
 ├── publisher.py                   # signal queue → strategy:stream:signals (XADD)
@@ -450,7 +452,11 @@ backend/engines/strategy/
 │
 ├── strategies/
 │   ├── __init__.py
-│   ├── base.py                    # abstract Strategy interface: prepare(), evaluate(snapshot) -> Action
+│   ├── base.py                    # Strategy protocol + shared contracts (Action, MarketView,
+│   │                              #   UniverseUpdate, VesselMemory). Component hooks per strategy:
+│   │                              #   create_memory / update_universe / build_snapshot /
+│   │                              #   on_tick / on_config_reload / prepare / on_pre_open / on_drain
+│   │                              #   Snapshot + memory types are STRATEGY-DEFINED (no central schema)
 │   │
 │   └── bid_ask_imbalance/
 │       ├── __init__.py

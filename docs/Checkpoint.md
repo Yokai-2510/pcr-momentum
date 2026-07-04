@@ -301,3 +301,23 @@ ssh -i ./nse_index_pcr_trading_pemkey.pem ubuntu@3.6.128.21 \
 If a step's Acceptance can't be met because of unrelated breakage, write a
 new entry in §4 (Known issues) describing what was found, and continue
 with the next step.
+
+---
+
+## Phase A — Multi-Strategy Platform Correctness (2026-07-05)
+
+All items implemented on branch `phase-a`; suite green (350 passed), ruff +
+mypy clean. Commits: f57206f → aa436b1 → 1212d86 → 688f876.
+
+| # | Item | Status |
+|---|---|---|
+| A2/A3 | Per-strategy keys everywhere; DEFAULT_STRATEGY_ID shims deleted; Signal v3 (`metrics_at_signal` free-form blob); config sections `strategy:{sid}` / `instrument:{sid}:{idx}` (alembic 0003) | done |
+| hot-path | Tick processor: no fixed flush timer; per-batch drain, chain flushed BEFORE tick publish; spot publishes immediately | done |
+| A1 | Generic runner: Strategy protocol component hooks (`create_memory` / `update_universe` / `build_snapshot` / `on_tick` / `on_config_reload`); runner imports no concrete strategy; `vessel_state.py` shared; `metrics:latest` generic analytics key | done |
+| A4 | Allocator per-vessel attribution + per-strategy `capital_inr` / `max_parallel_positions` caps; idempotent release; two strategies can hold the same instrument | done |
+| A5 | Restart-safe monitors: `resume_open_positions()` re-attaches D→F monitoring to open positions at boot; signal rehydrated from persisted blob | done |
+| A6 | One OS process per strategy (`pcr-strategy@{sid}.service`, `--strategy-id`); per-strategy engine flags + heartbeats; signal staleness gate (`signal_max_age_sec`, default 10 s) | done |
+
+Strategy integration (bootstrap-orders, rank-momentum, v1.1 addendum,
+premium-diff+ΔPCR) is deliberately NOT part of Phase A — separate plan.
+

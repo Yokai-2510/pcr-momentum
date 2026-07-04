@@ -212,7 +212,7 @@ Response 200:
 
 ### 4.2 `GET /configs/{section}`
 
-Returns one config section. `section` is one of `execution`, `session`, `risk`, `index:nifty50`, `index:banknifty`.
+Returns one config section. `section` is one of `execution`, `session`, `risk`, `strategy:{sid}` (free-form, strategy-defined JSON) or `instrument:{sid}:{idx}` (validated as IndexConfig). `GET /configs` groups the last two under `strategies` / `instruments` maps.
 
 Response 200: the config JSON for that section.
 
