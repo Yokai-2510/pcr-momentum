@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0004_strategy_daily_reports"
-down_revision = "0003_per_strategy_config_sections"
+revision = "0004_daily_reports"
+down_revision = "0003_per_strategy_cfgs"
 branch_labels = None
 depends_on = None
 
