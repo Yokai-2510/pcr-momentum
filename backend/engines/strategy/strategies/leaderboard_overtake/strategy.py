@@ -45,7 +45,7 @@ from engines.strategy.strategies.base import (
 from engines.strategy.strategies.nifty50_common import direction as direction_mod
 from engines.strategy.strategies.nifty50_common import ranking as ranking_mod
 from engines.strategy.strategies.nifty50_common import selection as selection_mod
-from engines.strategy.strategies.open_gainer_loser.strategy import UniverseView
+from engines.strategy.strategies.nifty50_common.views import UniverseView, empty_chain
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -89,10 +89,6 @@ def _hhmmss(now_ms: int) -> str:
 def _pair_key(category: str, symbol_a: str, symbol_b: str) -> str:
     left, right = sorted((symbol_a, symbol_b))
     return f"{category}|{left}|{right}"
-
-
-def _empty_chain(_symbol: str) -> dict[str, Any]:
-    return {}
 
 
 def check_overtake_churn(
@@ -233,7 +229,7 @@ class LeaderboardOvertakeStrategy:
             now_ms=market.now_ms,
             spot=market.spot,
             symbols=market.meta.get("symbols") or {},
-            read_chain=market.read_chain or _empty_chain,
+            read_chain=market.read_chain or empty_chain,
         )
 
     # ── Decision function ──────────────────────────────────────────────

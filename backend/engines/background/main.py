@@ -34,6 +34,7 @@ import redis.asyncio as _redis_async
 from loguru import logger
 
 from engines.background import (
+    eod_reports,
     instrument_refresh,
     kill_switch_poller,
     log_rotation,
@@ -119,6 +120,8 @@ async def _scheduler_consumer(
                     elif kind == "nightly_maintenance":
                         await pg_maintenance.run_vacuum_analyze(pool)
                         await log_rotation.record_run(redis_async)
+                    elif kind == "market_close":
+                        await eod_reports.generate_daily_reports(pool, redis_async)
                     elif kind == "daily_reset":
                         await _on_daily_reset(redis_async)
                     else:

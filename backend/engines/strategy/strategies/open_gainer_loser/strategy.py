@@ -24,7 +24,6 @@ hold 1200 s, EOD square-off).
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -40,21 +39,11 @@ from engines.strategy.strategies.base import (
 from engines.strategy.strategies.nifty50_common import direction as direction_mod
 from engines.strategy.strategies.nifty50_common import ranking as ranking_mod
 from engines.strategy.strategies.nifty50_common import selection as selection_mod
+from engines.strategy.strategies.nifty50_common.views import UniverseView, empty_chain
 
 _IST = ZoneInfo("Asia/Kolkata")
 
 _CATEGORIES = ("GAINER", "LOSER")
-
-
-@dataclass(slots=True, frozen=True)
-class UniverseView:
-    """This strategy's snapshot: universe spot map + lazy chain access."""
-
-    instrument_id: str
-    now_ms: int
-    spot: dict[str, dict[str, Any]]  # SYMBOL -> {ltp, prev_close, change_pct, volume, ts}
-    symbols: dict[str, dict[str, Any]]  # universe meta symbols
-    read_chain: Callable[[str], dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -85,10 +74,6 @@ def _ist_epoch_ms_at(now_ms: int, hhmmss: str) -> int:
     now_ist = datetime.fromtimestamp(now_ms / 1000.0, tz=_IST)
     h, m, s = (int(x) for x in hhmmss.split(":"))
     return int(now_ist.replace(hour=h, minute=m, second=s, microsecond=0).timestamp() * 1000)
-
-
-def _empty_chain(_symbol: str) -> dict[str, Any]:
-    return {}
 
 
 class OpenGainerLoserStrategy:
@@ -140,7 +125,7 @@ class OpenGainerLoserStrategy:
             now_ms=market.now_ms,
             spot=market.spot,
             symbols=market.meta.get("symbols") or {},
-            read_chain=market.read_chain or _empty_chain,
+            read_chain=market.read_chain or empty_chain,
         )
 
     # ── Decision function ──────────────────────────────────────────────

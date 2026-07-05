@@ -1,9 +1,9 @@
 """open_gainer_loser — buy the open's top NIFTY-50 mover, both sides."""
 
+from engines.strategy.strategies.nifty50_common.views import UniverseView
 from engines.strategy.strategies.open_gainer_loser.strategy import (
     OpenGainerLoserMemory,
     OpenGainerLoserStrategy,
-    UniverseView,
 )
 
 STRATEGY_ID = "open_gainer_loser_v1"
