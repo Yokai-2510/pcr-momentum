@@ -323,3 +323,26 @@ mypy clean. Commits: f57206f → aa436b1 → 1212d86 → 688f876.
 Strategy integration (bootstrap-orders, rank-momentum, v1.1 addendum,
 premium-diff+ΔPCR) is deliberately NOT part of Phase A — separate plan.
 
+---
+
+## Phase B.1 — bootstrap_momentum_v1 (2026-07-05)
+
+First Phase-B strategy, ported 1:1 from the original rank-momentum
+`bootstrap_orders` pipeline. Registered on nifty50 + banknifty vessels
+(DEFAULT_VESSELS + seeded configs; runs as its own OS process via
+`pcr-strategy@bootstrap_momentum_v1.service`).
+
+- Timeline: ~09:10 settlement premium snapshot → 09:15 open → fire ONCE
+  within `entry.window_sec` (60 s; restart-safe guard) → done for the day.
+- Direction: `basic` (category map) / `post_settlement_bias` (CE-sum vs
+  PE-sum % change vs snapshot across bucket strikes, threshold_pct) /
+  `fixed`; optional majority-vote smoothing; NEUTRAL policy =
+  category | CE | PE | skip.
+- Selection: strike_reference ATM/OTM/ITM + strike_offset (CE/PE symmetric,
+  OOB clamps to ATM); leaf must have live LTP + token; premium range filter.
+- Freshness: selected option leaf must tick AFTER 09:15:00 (leaf.ts gate) —
+  ghost-entry protection; plus the platform's signal_max_age_sec gate.
+- Exits (instrument config -> order-exec monitor): SL -20%, target ceiling
+  30% (trailing-target mapping), TSL arm 10% / trail 3%, max hold 1200 s,
+  EOD square-off. Full bias audit travels on Signal.strategy_snapshot.
+

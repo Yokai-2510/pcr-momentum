@@ -29,11 +29,18 @@ from engines.strategy.strategies.bid_ask_imbalance import (
 from engines.strategy.strategies.bid_ask_imbalance import (
     BidAskImbalanceStrategy,
 )
+from engines.strategy.strategies.bootstrap_momentum import (
+    STRATEGY_ID as BOOTSTRAP_ID,
+)
+from engines.strategy.strategies.bootstrap_momentum import (
+    BootstrapMomentumStrategy,
+)
 from state import keys as K
 
 # Static dispatch table: strategy_id -> Strategy class
 _STRATEGY_CLASSES: dict[str, type[Strategy]] = {
     BID_ASK_ID: BidAskImbalanceStrategy,
+    BOOTSTRAP_ID: BootstrapMomentumStrategy,
 }
 
 

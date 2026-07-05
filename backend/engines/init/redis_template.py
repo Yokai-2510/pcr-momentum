@@ -116,6 +116,8 @@ TEMPLATE: dict[str, dict[str, Any]] = {
 DEFAULT_VESSELS: tuple[tuple[str, str], ...] = (
     ("bid_ask_imbalance_v1", "nifty50"),
     ("bid_ask_imbalance_v1", "banknifty"),
+    ("bootstrap_momentum_v1", "nifty50"),
+    ("bootstrap_momentum_v1", "banknifty"),
 )
 
 
@@ -176,6 +178,74 @@ DEFAULT_STRATEGY_CONFIG_BID_ASK: dict[str, Any] = {
         {"start": "13:30", "end": "15:00", "phase": "CONTINUATION_ONLY", "min_score": 7},
         {"start": "15:00", "end": "15:30", "phase": "EXIT_ONLY", "min_score": None},
     ],
+}
+
+DEFAULT_STRATEGY_CONFIG_BOOTSTRAP: dict[str, Any] = {
+    # One-shot market-open entry (original bootstrap_orders defaults).
+    "capital_inr": 0,  # 0 = bounded only by the global capital envelope
+    "max_parallel_positions": 2,  # one per instrument vessel
+    "entry": {
+        "window_sec": 60,  # only fire within 60s of open (restart-safe guard)
+        "wait_for_fresh_tick": True,  # option leaf must tick after 09:15:00
+    },
+    "session": {"market_open": "09:15:00"},
+    "direction_prediction": {
+        # "basic" (category map) | "post_settlement_bias" | "fixed"
+        "mode": "post_settlement_bias",
+        "fixed_side": "CE",
+        "neutral_fallback": "category",  # original: NEUTRAL -> category map
+        "smoothing_enabled": False,
+        "smoothing_periods": 3,
+        "post_settlement_bias": {
+            "snapshot_time": "09:10:00",
+            "bucket": "ITM",
+            "strike_count": 3,
+            "threshold_pct": 0.5,
+        },
+    },
+    "instrument_selection": {"strike_reference": "ITM", "strike_offset": 2},
+    "filters": {"premium": {"enabled": False, "min_ltp": 40, "max_ltp": 450}},
+    "universe": {"subscribe_range": 6},
+    # Per-strategy execution overrides (urgency: patient entry at open).
+    "execution": {"signal_max_age_sec": 10},
+}
+
+# Per-(strategy, instrument) exit/sizing config for bootstrap. Exit profile
+# maps the original exit_conditions: SL -20%, trailing-target ceiling 30%,
+# TSL arm 10% / trail 3%, time exit 1200s (EOD handled by order-exec).
+BOOTSTRAP_INSTRUMENT_CONFIGS: dict[str, dict[str, Any]] = {
+    "nifty50": {
+        "instrument_id": "nifty50",
+        "category": "GAINER",  # NEUTRAL fallback side: GAINER->CE, LOSER->PE
+        "strike_step": 50,
+        "lot_size": 75,
+        "qty_lots": 1,
+        "max_entries_per_day": 1,
+        "max_reversals_per_day": 0,
+        "sl_pct": 0.20,
+        "target_pct": 0.30,
+        "tsl_arm_pct": 0.10,
+        "tsl_trail_pct": 0.03,
+        "max_hold_sec": 1200,
+        "post_sl_cooldown_sec": 0,
+        "post_reversal_cooldown_sec": 0,
+    },
+    "banknifty": {
+        "instrument_id": "banknifty",
+        "category": "GAINER",
+        "strike_step": 100,
+        "lot_size": 35,
+        "qty_lots": 1,
+        "max_entries_per_day": 1,
+        "max_reversals_per_day": 0,
+        "sl_pct": 0.20,
+        "target_pct": 0.30,
+        "tsl_arm_pct": 0.10,
+        "tsl_trail_pct": 0.03,
+        "max_hold_sec": 1200,
+        "post_sl_cooldown_sec": 0,
+        "post_reversal_cooldown_sec": 0,
+    },
 }
 
 DEFAULT_INSTRUMENT_CONFIGS: dict[str, dict[str, Any]] = {
@@ -267,10 +337,19 @@ async def seed_strategy_registry(redis: _redis_async.Redis) -> None:
         orjson.dumps(DEFAULT_STRATEGY_CONFIG_BID_ASK),
         nx=True,  # don't clobber operator-tuned configs
     )
+    pipe.set(
+        K.strategy_config("bootstrap_momentum_v1"),
+        orjson.dumps(DEFAULT_STRATEGY_CONFIG_BOOTSTRAP),
+        nx=True,
+    )
 
-    # Instrument-level configs
+    # Instrument-level configs — each strategy has its OWN per-instrument blob.
+    instrument_configs_by_sid: dict[str, dict[str, dict[str, Any]]] = {
+        "bid_ask_imbalance_v1": DEFAULT_INSTRUMENT_CONFIGS,
+        "bootstrap_momentum_v1": BOOTSTRAP_INSTRUMENT_CONFIGS,
+    }
     for sid, idx in DEFAULT_VESSELS:
-        cfg = DEFAULT_INSTRUMENT_CONFIGS.get(idx)
+        cfg = instrument_configs_by_sid.get(sid, {}).get(idx)
         if cfg is not None:
             pipe.set(
                 K.strategy_config_instrument(sid, idx),

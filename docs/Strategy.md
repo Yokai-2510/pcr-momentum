@@ -458,6 +458,11 @@ backend/engines/strategy/
 │   │                              #   on_tick / on_config_reload / prepare / on_pre_open / on_drain
 │   │                              #   Snapshot + memory types are STRATEGY-DEFINED (no central schema)
 │   │
+│   ├── bootstrap_momentum/        # one-shot market-open entry (ported from rank-momentum bootstrap_orders)
+│   │   ├── strategy.py            # session state machine: 09:10 snapshot → 09:15+60s window → fire once
+│   │   ├── direction.py           # basic / post_settlement_bias / fixed; bucket sums vs 09:10 snapshot
+│   │   └── selection.py           # strike_reference (ATM/OTM/ITM) + offset, CE/PE symmetric; premium filter
+│   │
 │   └── bid_ask_imbalance/
 │       ├── __init__.py
 │       ├── strategy.py            # BidAskImbalanceStrategy — orchestrates everything below
