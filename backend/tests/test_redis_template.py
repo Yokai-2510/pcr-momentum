@@ -35,7 +35,7 @@ async def test_apply_writes_canonical_defaults(redis) -> None:
 
 async def test_per_index_runtime_keys(redis) -> None:
     await redis_template.apply(redis, flush_runtime=False)
-    for idx in K.INDEXES:
+    for idx in ("nifty50", "banknifty"):
         assert (await redis.get(K.vessel_state("bid_ask_imbalance_v1", idx))) == b"FLAT"
         assert (await redis.get(K.vessel_enabled("bid_ask_imbalance_v1", idx))) == b"true"
         assert (await redis.get(K.vessel_counter_entries("bid_ask_imbalance_v1", idx))) == b"0"

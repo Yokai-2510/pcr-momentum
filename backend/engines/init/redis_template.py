@@ -118,6 +118,16 @@ DEFAULT_VESSELS: tuple[tuple[str, str], ...] = (
     ("bid_ask_imbalance_v1", "banknifty"),
     ("open_gainer_loser_v1", "nifty50_stocks"),
     ("leaderboard_overtake_v1", "nifty50_stocks"),
+    *[
+        (sid, idx)
+        for sid in (
+            "oi_crossover_v1",
+            "volume_diff_v1",
+            "vwap_band_v1",
+            "ltp_strength_v1",
+        )
+        for idx in ("nifty50", "banknifty", "sensex")
+    ],
 )
 
 
@@ -293,6 +303,96 @@ def _universe_instrument_config(max_positions: int, max_entries: int) -> dict[st
     }
 
 
+def _pcr_strategy_config(name: str, description: str, **indicator: Any) -> dict[str, Any]:
+    """Each PCR strategy carries its OWN complete config — entry gates,
+    indicator params AND the full exit stack. Nothing is shared."""
+    return {
+        "name": name,
+        "description": description,
+        "capital_inr": 0,
+        "max_parallel_positions": 3,  # one leg per index
+        "session": {"market_open": "09:15:00", "market_close": "15:30:00"},
+        "entry": {
+            "no_entry_after": "15:25:00",
+            "max_entries_per_day": 20,
+            "cooldown_minutes": 0,
+            "max_leaf_age_sec": 10,
+        },
+        "instrument_selection": {"strike_offset": 0},  # ATM
+        "universe": {"subscribe_range": 7, "hysteresis_sec": 5},
+        "indicator": indicator,
+        "exits": {
+            "exit_on_counter_crossover": True,
+            "sl_pct": 20.0,
+            "target_pct": 0.0,  # 0 = disabled (crossover is the primary exit)
+            "trailing_sl_enabled": True,
+            "trailing_sl_trigger_pct": 10.0,
+            "trailing_sl_step_pct": 3.0,
+            "peak_trail_enabled": False,
+            "peak_trail_pct": 80.0,
+            "time_exit_enabled": False,
+            "time_exit_at": "",
+        },
+        "execution": {"signal_max_age_sec": 10},
+    }
+
+
+PCR_STRATEGY_CONFIGS: dict[str, dict[str, Any]] = {
+    "oi_crossover_v1": _pcr_strategy_config(
+        "OI Crossover",
+        "PE-CE cumulative OI difference sign crossover over the ATM band.",
+        band_strikes=5,
+    ),
+    "volume_diff_v1": _pcr_strategy_config(
+        "Volume Diff",
+        "ATM-band PE-CE volume difference sign crossover.",
+        band_strikes=5,
+    ),
+    "vwap_band_v1": _pcr_strategy_config(
+        "VWAP Band",
+        "Spot vs session VWAP with a 0.05% band; fresh crossovers only.",
+        band_strikes=5,
+        band_pct=0.0005,
+    ),
+    "ltp_strength_v1": _pcr_strategy_config(
+        "LTP Strength",
+        "Strict 5-condition LTP option-strength regime (CE/PE session sums, "
+        "rolling strength, VWAP confirmation).",
+        band_strikes=5,
+        rolling_minutes=5,
+    ),
+}
+
+# Per-index sizing for the PCR strategies. The wide exit-profile values are
+# a catastrophic backstop only — each strategy's OWN exit stack (above) is
+# the real exit logic and fires first via EXIT signals.
+_PCR_INDEX_SIZING: dict[str, dict[str, Any]] = {
+    "nifty50": {"strike_step": 50, "lot_size": 75},
+    "banknifty": {"strike_step": 100, "lot_size": 35},
+    "sensex": {"strike_step": 100, "lot_size": 20},
+}
+
+
+def _pcr_instrument_config(idx: str) -> dict[str, Any]:
+    sizing = _PCR_INDEX_SIZING[idx]
+    return {
+        "instrument_id": idx,
+        "strike_step": sizing["strike_step"],
+        "lot_size": sizing["lot_size"],
+        "qty_lots": 1,
+        "max_positions_per_vessel": 1,
+        "max_entries_per_day": 20,
+        "max_reversals_per_day": 0,
+        "sl_pct": 0.50,
+        "target_pct": 3.0,
+        "tsl_arm_pct": 3.0,
+        "tsl_trail_pct": 0.50,
+        "max_hold_sec": 22500,
+        "post_sl_cooldown_sec": 0,
+        "post_reversal_cooldown_sec": 0,
+    }
+
+
 UNIVERSE_INSTRUMENT_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
     "open_gainer_loser_v1": {
         "nifty50_stocks": _universe_instrument_config(max_positions=2, max_entries=2)
@@ -402,10 +502,17 @@ async def seed_strategy_registry(redis: _redis_async.Redis) -> None:
         nx=True,
     )
 
+    for pcr_sid, pcr_cfg in PCR_STRATEGY_CONFIGS.items():
+        pipe.set(K.strategy_config(pcr_sid), orjson.dumps(pcr_cfg), nx=True)
+
     # Instrument-level configs — each strategy has its OWN per-instrument blob.
     instrument_configs_by_sid: dict[str, dict[str, dict[str, Any]]] = {
         "bid_ask_imbalance_v1": DEFAULT_INSTRUMENT_CONFIGS,
         **UNIVERSE_INSTRUMENT_CONFIGS,
+        **{
+            pcr_sid: {idx: _pcr_instrument_config(idx) for idx in _PCR_INDEX_SIZING}
+            for pcr_sid in PCR_STRATEGY_CONFIGS
+        },
     }
     for sid, idx in DEFAULT_VESSELS:
         cfg = instrument_configs_by_sid.get(sid, {}).get(idx)

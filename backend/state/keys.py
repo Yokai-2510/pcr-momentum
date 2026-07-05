@@ -26,7 +26,7 @@ from typing import Final, Literal
 # Type aliases
 # ---------------------------------------------------------------------------
 IndexName = Literal["nifty50", "banknifty", "sensex"]
-INDEXES: Final[tuple[IndexName, ...]] = ("nifty50", "banknifty")  # sensex reserved
+INDEXES: Final[tuple[IndexName, ...]] = ("nifty50", "banknifty", "sensex")
 
 # Trading-disabled-reason enum (Schema.md §1.1)
 TradingDisabledReason = Literal[

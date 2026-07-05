@@ -23,6 +23,7 @@ from state import registry
 INDEX_SPOT_TOKENS: dict[str, str] = {
     "nifty50": "NSE_INDEX|Nifty 50",
     "banknifty": "NSE_INDEX|Nifty Bank",
+    "sensex": "BSE_INDEX|SENSEX",
 }
 
 

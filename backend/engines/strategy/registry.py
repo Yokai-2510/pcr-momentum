@@ -35,16 +35,24 @@ from engines.strategy.strategies.leaderboard_overtake import (
 from engines.strategy.strategies.leaderboard_overtake import (
     LeaderboardOvertakeStrategy,
 )
+from engines.strategy.strategies.ltp_strength import LtpStrengthStrategy
+from engines.strategy.strategies.oi_crossover import OiCrossoverStrategy
 from engines.strategy.strategies.open_gainer_loser import (
     STRATEGY_ID as OPEN_GL_ID,
 )
 from engines.strategy.strategies.open_gainer_loser import (
     OpenGainerLoserStrategy,
 )
+from engines.strategy.strategies.volume_diff import VolumeDiffStrategy
+from engines.strategy.strategies.vwap_band import VwapBandStrategy
 from state import keys as K
 
 # Static dispatch table: strategy_id -> Strategy class
 _STRATEGY_CLASSES: dict[str, type[Strategy]] = {
+    "oi_crossover_v1": OiCrossoverStrategy,
+    "volume_diff_v1": VolumeDiffStrategy,
+    "vwap_band_v1": VwapBandStrategy,
+    "ltp_strength_v1": LtpStrengthStrategy,
     BID_ASK_ID: BidAskImbalanceStrategy,
     OPEN_GL_ID: OpenGainerLoserStrategy,
     OVERTAKE_ID: LeaderboardOvertakeStrategy,

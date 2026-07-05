@@ -86,7 +86,7 @@ class TestPosOrderHelpers:
 
 class TestEnumsAndIndexes:
     def test_index_tuple_complete(self) -> None:
-        assert set(keys.INDEXES) == {"nifty50", "banknifty"}
+        assert set(keys.INDEXES) == {"nifty50", "banknifty", "sensex"}
 
     def test_heartbeat_fields_cover_engines(self) -> None:
         # Sanity: contains at least one entry per logical engine.
