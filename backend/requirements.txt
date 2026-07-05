@@ -36,6 +36,7 @@ pydantic-settings>=2.7.0         # .env / settings loader
 APScheduler>=3.11.0               # cron-like scheduler engine
 
 # --- HTTP client (for broker REST calls) ---
+requests>=2.31.0                 # NSE constituents fetch (nifty50_universe)
 httpx>=0.28.0                     # async HTTP client
 
 # --- Logging ---
