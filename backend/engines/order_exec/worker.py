@@ -45,6 +45,7 @@ from loguru import logger
 from engines.order_exec import (
     allocator,
     cleanup,
+    exec_policy,
     exit_eval,
     exit_submit,
     pre_entry_gate,
@@ -681,12 +682,14 @@ def _monitor_and_close(
         strategy_pull = _decode(strategy_pull_raw) or None
 
         daily_loss = _decode(redis_sync.get(K.SYSTEM_FLAGS_DAILY_LOSS_CIRCUIT_TRIGGERED)) == "true"
+        exec_cfg = exec_policy.read_execution_policy(redis_sync, signal.strategy_id)
         should_exit, reason_enum = exit_eval.evaluate(
             position,
             current_premium=cur_premium,
             current_leaf=leaf,
             now_ts_ms=_now_ts_ms(),
             now_hhmm=_now_hhmm(),
+            eod_squareoff_hhmm=str(exec_cfg.get("eod_squareoff_hhmm") or "15:15"),
             daily_loss_circuit_triggered=daily_loss,
             strategy_exit_pull=strategy_pull,
         )

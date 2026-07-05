@@ -356,10 +356,14 @@ async def vessel_loop(
             await asyncio.wait_for(dirty.wait(), timeout=2.0)
         dirty.clear()
 
-        # Check session-end (15:30 IST).
+        # Check session-end (config-driven; default 15:30 IST).
         now_ist = datetime.now(_IST)
-        hhmm = f"{now_ist.hour:02d}:{now_ist.minute:02d}"
-        if hhmm >= "15:30":
+        hhmm = f"{now_ist.hour:02d}:{now_ist.minute:02d}:{now_ist.second:02d}"
+        session_close = str(
+            (spec.context.strategy_config.get("session") or {}).get("market_close")
+            or "15:30:00"
+        )
+        if hhmm >= session_close:
             log.info("vessel: session close reached — draining")
             spec.strategy.on_drain(spec.context)
             break
