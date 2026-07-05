@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -80,6 +80,16 @@ class Signal(BaseModel):
     # never routes on these.
     metrics_at_signal: dict[str, float] = Field(
         default_factory=dict, description="Strategy-defined numeric metrics at decision time"
+    )
+
+    # FULL strategy-defined state snapshot at decision time — any JSON-able
+    # shape (nested dicts, per-strike breakdowns, gate results, labels...).
+    # Flows into the position record and the closed-trade report so every
+    # trade is forensically reconstructible. Strategies choose what to put
+    # here; the infra never inspects it.
+    strategy_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Strategy-defined JSON snapshot of decision state (free-form)",
     )
 
     ts: datetime = Field(..., description="Emission timestamp (UTC ISO-8601)")

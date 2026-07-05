@@ -316,6 +316,8 @@ mypy clean. Commits: f57206f → aa436b1 → 1212d86 → 688f876.
 | A1 | Generic runner: Strategy protocol component hooks (`create_memory` / `update_universe` / `build_snapshot` / `on_tick` / `on_config_reload`); runner imports no concrete strategy; `vessel_state.py` shared; `metrics:latest` generic analytics key | done |
 | A4 | Allocator per-vessel attribution + per-strategy `capital_inr` / `max_parallel_positions` caps; idempotent release; two strategies can hold the same instrument | done |
 | A5 | Restart-safe monitors: `resume_open_positions()` re-attaches D→F monitoring to open positions at boot; signal rehydrated from persisted blob | done |
+| A7 | Per-strategy execution policy: strategy config `execution` block overrides any global knob (exec_policy.read_execution_policy; used by entry, exit_submit, pre-entry gate) | done |
+| A8 | Strategy decision snapshots: `Action.snapshot` (or metrics fallback) → `Signal.strategy_snapshot` → `Position.strategy_snapshot_entry` → report `signal_snapshot`. Free-form JSON, strategy-defined shape | done |
 | A6 | One OS process per strategy (`pcr-strategy@{sid}.service`, `--strategy-id`); per-strategy engine flags + heartbeats; signal staleness gate (`signal_max_age_sec`, default 10 s) | done |
 
 Strategy integration (bootstrap-orders, rank-momentum, v1.1 addendum,

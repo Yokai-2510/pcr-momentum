@@ -31,6 +31,21 @@ _KIND_TO_INTENT: dict[ActionKind, SignalIntent] = {
 }
 
 
+def _json_sanitize(blob: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort JSON round-trip: drops keys whose values can't serialize."""
+    out: dict[str, Any] = {}
+    for k, v in blob.items():
+        try:
+            orjson.dumps(v)
+        except Exception:
+            try:
+                v = orjson.loads(orjson.dumps(v, default=str))
+            except Exception:
+                continue
+        out[str(k)] = v
+    return out
+
+
 def _mint_sig_id(strategy_id: str, instrument_id: str, action: Action, ts_ms: int) -> str:
     raw = f"{strategy_id}|{instrument_id}|{action.kind.value}|{action.side}|{action.strike}|{ts_ms}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -81,6 +96,11 @@ async def emit_signal(
         # Free-form forensic metrics — whatever numeric values the strategy
         # put on its Action. Strategy-defined names; no central schema.
         metrics_at_signal={k: float(v) for k, v in metrics.items() if isinstance(v, int | float)},
+        # FULL decision-state snapshot: Action.snapshot when provided, else
+        # the whole metrics dict (nested values included) — JSON-sanitized.
+        strategy_snapshot=_json_sanitize(
+            action.snapshot if action.snapshot is not None else metrics
+        ),
     )
     payload = sig.model_dump(mode="json")
     payload_json = orjson.dumps(payload)

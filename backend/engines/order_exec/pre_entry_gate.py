@@ -28,7 +28,7 @@ from typing import Any
 import orjson
 import redis as _redis_sync
 
-from engines.order_exec import allocator
+from engines.order_exec import allocator, exec_policy
 from state import keys as K
 from state.schemas.signal import Signal
 
@@ -79,13 +79,11 @@ def _read_leaf_for_token(
     return None
 
 
-def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
-    raw = redis_sync.get(K.STRATEGY_CONFIGS_EXECUTION)
-    if not raw:
-        return {}
-    blob = raw if isinstance(raw, bytes) else raw.encode()
-    parsed = orjson.loads(blob)
-    return parsed if isinstance(parsed, dict) else {}
+def _read_execution_config(
+    redis_sync: _redis_sync.Redis, strategy_id: str | None = None
+) -> dict[str, Any]:
+    """Global execution config overlaid with the strategy's own overrides."""
+    return exec_policy.read_execution_policy(redis_sync, strategy_id)
 
 
 def _read_risk_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
@@ -123,7 +121,7 @@ def check(redis_sync: _redis_sync.Redis, signal: Signal) -> tuple[bool, str]:
     #    `signal_max_age_sec` (execution config; default 10 s). Guards against
     #    ghost entries from replayed/queued signals after an outage: the
     #    price the strategy decided on no longer exists.
-    exec_cfg = _read_execution_config(redis_sync)
+    exec_cfg = _read_execution_config(redis_sync, signal.strategy_id)
     max_age_sec = float(exec_cfg.get("signal_max_age_sec") or 10)
     if signal.decision_ts > 0 and max_age_sec > 0:
         age_sec = (time.time() * 1000 - signal.decision_ts) / 1000.0

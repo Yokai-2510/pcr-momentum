@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -93,3 +93,7 @@ class Position(BaseModel):
     sum_pe_at_entry: float
     delta_pcr_at_entry: float | None = None
     strategy_version: str
+    # FULL strategy-defined decision snapshot captured from the Signal at
+    # entry time (free-form JSON — see Signal.strategy_snapshot). Lets any
+    # open/closed position answer "what did the strategy see when it fired?"
+    strategy_snapshot_entry: dict[str, Any] | None = None

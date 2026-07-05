@@ -27,6 +27,7 @@ import redis as _redis_sync
 from loguru import logger
 
 from brokers.upstox import UpstoxAPI
+from engines.order_exec import exec_policy
 from state import keys as K
 from state.schemas.position import Position
 
@@ -49,13 +50,11 @@ def _decode(value: Any) -> str:
     return str(value)
 
 
-def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
-    raw = redis_sync.get(K.STRATEGY_CONFIGS_EXECUTION)
-    if not raw:
-        return {}
-    blob = raw if isinstance(raw, bytes) else raw.encode()
-    parsed = orjson.loads(blob)
-    return parsed if isinstance(parsed, dict) else {}
+def _read_execution_config(
+    redis_sync: _redis_sync.Redis, strategy_id: str | None = None
+) -> dict[str, Any]:
+    """Global execution config overlaid with the strategy's own overrides."""
+    return exec_policy.read_execution_policy(redis_sync, strategy_id)
 
 
 def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
@@ -95,7 +94,7 @@ def submit_and_complete_paper(
 ) -> ExitResult:
     """Paper-mode exit — fills immediately at best_bid minus buffer."""
     log = logger.bind(engine="order_exec", index=position.index, pos_id=position.pos_id)
-    cfg = _read_execution_config(redis_sync)
+    cfg = _read_execution_config(redis_sync, position.strategy_version)
     buffer_inr = _effective_buffer(now_hhmm, cfg)
 
     submit_ts = _now_ts_ms()
@@ -148,7 +147,7 @@ def submit_and_complete_live(
 ) -> ExitResult:
     """Live-mode exit — modify-only SELL loop, never abandons."""
     log = logger.bind(engine="order_exec", index=position.index, pos_id=position.pos_id)
-    cfg = _read_execution_config(redis_sync)
+    cfg = _read_execution_config(redis_sync, position.strategy_version)
     buffer_inr = _effective_buffer(now_hhmm, cfg)
 
     leaf = _read_leaf(redis_sync, position.index, position.instrument_token)

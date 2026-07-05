@@ -31,6 +31,7 @@ import redis as _redis_sync
 from loguru import logger
 
 from brokers.upstox import UpstoxAPI
+from engines.order_exec import exec_policy
 from state import keys as K
 from state.schemas.signal import Signal
 
@@ -54,13 +55,11 @@ def _decode(value: Any) -> str:
     return str(value)
 
 
-def _read_execution_config(redis_sync: _redis_sync.Redis) -> dict[str, Any]:
-    raw = redis_sync.get(K.STRATEGY_CONFIGS_EXECUTION)
-    if not raw:
-        return {}
-    blob = raw if isinstance(raw, bytes) else raw.encode()
-    parsed = orjson.loads(blob)
-    return parsed if isinstance(parsed, dict) else {}
+def _read_execution_config(
+    redis_sync: _redis_sync.Redis, strategy_id: str | None = None
+) -> dict[str, Any]:
+    """Global execution config overlaid with the strategy's own overrides."""
+    return exec_policy.read_execution_policy(redis_sync, strategy_id)
 
 
 def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
@@ -93,7 +92,7 @@ def submit_and_monitor_paper(
 ) -> EntryResult:
     """Paper-mode entry. Reads current ask, simulates immediate fill at ask+buffer."""
     log = logger.bind(engine="order_exec", index=signal.index, pos_id=pos_id)
-    cfg = _read_execution_config(redis_sync)
+    cfg = _read_execution_config(redis_sync, signal.strategy_id)
     buffer_inr = float(cfg.get("buffer_inr") or 2.0)
 
     submit_ts = _now_ts_ms()
@@ -158,7 +157,7 @@ def submit_and_monitor_live(
 ) -> EntryResult:
     """Live-mode entry. Places DAY LIMIT, monitors via portfolio WS events."""
     log = logger.bind(engine="order_exec", index=signal.index, pos_id=pos_id)
-    cfg = _read_execution_config(redis_sync)
+    cfg = _read_execution_config(redis_sync, signal.strategy_id)
     buffer_inr = float(cfg.get("buffer_inr") or 2.0)
     drift_threshold = float(cfg.get("drift_threshold_inr") or 3.0)
     chase_ceiling = float(cfg.get("chase_ceiling_inr") or 15.0)

@@ -253,6 +253,13 @@ See Strategy.md §10 for the full config schema.
 | `orders:allocator:open_count` | HASH | Open position counts, same field scheme as `deployed` |
 | `orders:allocator:open_symbols` | SET | Currently in-position vessels (`{sid}:{idx}` entries) |
 
+Execution policy resolution (every order-path knob — `buffer_inr`,
+`open_timeout_sec`, `max_retries`, `chase_ceiling_inr`, `partial_grace_sec`,
+`spread_skip_pct`, `signal_max_age_sec`, `eod_buffer_inr`): built-in default
+< global `strategy:configs:execution` < the strategy's OWN `execution` block
+inside `strategy:configs:strategies:{sid}`. A strategy can override any knob
+(urgency differs per strategy) without touching global config.
+
 Reservation caps (checked atomically, in order): per-vessel single position → strategy `max_parallel_positions` → strategy `capital_inr` → global `max_concurrent_positions` → global `trading_capital_inr`. Per-strategy caps come from the strategy's own config blob; `0`/absent = unlimited within the global envelope.
 
 #### Positions (Order Exec writes)

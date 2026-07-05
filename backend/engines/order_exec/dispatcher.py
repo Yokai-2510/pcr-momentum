@@ -116,6 +116,7 @@ async def _signal_from_payload(payload: dict[str, str]) -> Signal | None:
                 "decision_ts": _opt_int(payload, "decision_ts")
                 or int(__import__("time").time() * 1000),
                 "metrics_at_signal": _metrics_dict(payload, "metrics_at_signal"),
+                "strategy_snapshot": _opt_dict(payload, "strategy_snapshot"),
                 "ts": payload["ts"],
             }
         )

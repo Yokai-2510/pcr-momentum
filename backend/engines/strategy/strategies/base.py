@@ -57,6 +57,11 @@ class Action:
     reason: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
     score_breakdown: dict[str, int] = field(default_factory=dict)
+    # Optional FULL decision-state snapshot (free-form JSON-able). When set,
+    # it is carried on the Signal (`strategy_snapshot`), stored on the
+    # position record, and embedded in the closed-trade report. When None,
+    # the publisher falls back to the metrics dict.
+    snapshot: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

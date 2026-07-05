@@ -243,7 +243,7 @@ def _load_position_from_hash(redis_sync: _redis_sync.Redis, pos_id: str) -> Posi
     for field, value in decoded.items():
         if not value:
             continue
-        if field == "exit_profile":
+        if field in ("exit_profile", "strategy_snapshot_entry"):
             try:
                 typed[field] = orjson.loads(value)
             except Exception:
@@ -546,6 +546,7 @@ def process_signal(
         ),
         delta_pcr_at_entry=signal.metrics_at_signal.get("delta_pcr"),
         strategy_version=signal.strategy_id,
+        strategy_snapshot_entry=signal.strategy_snapshot or None,
     )
 
     # Vessel-side state transition on confirmed entry fill. Order-exec is the
