@@ -118,6 +118,7 @@ DEFAULT_VESSELS: tuple[tuple[str, str], ...] = (
     ("bid_ask_imbalance_v1", "banknifty"),
     ("open_gainer_loser_v1", "nifty50_stocks"),
     ("leaderboard_overtake_v1", "nifty50_stocks"),
+    ("rank_momentum_v2", "nifty50_stocks"),
     *[
         (sid, idx)
         for sid in (
@@ -337,6 +338,42 @@ def _pcr_strategy_config(name: str, description: str, **indicator: Any) -> dict[
     }
 
 
+DEFAULT_STRATEGY_CONFIG_RANK_MOMENTUM: dict[str, Any] = {
+    "name": "Rank Momentum",
+    "description": (
+        "Foolproof Rank Momentum v2: NIFTY-50 option order-flow ranking "
+        "(Net Delta / Delta Velocity / Dynamic Rank Score); confidence-gated "
+        "BUY CE on bullish leaders, BUY PE on bearish leaders; Exit Score "
+        "(flip-off, rank loss, DV reversal, VWAP loss) closes legs per tick."
+    ),
+    "capital_inr": 0,
+    "max_parallel_positions": 4,
+    "session": {"market_open": "09:15:00", "market_close": "15:30:00"},
+    "entry": {
+        "no_entry_after": "15:10:00",
+        "max_entries_per_day": 10,
+        "symbol_cooldown_sec": 900,
+        "max_leaf_age_sec": 10,
+    },
+    "instrument_selection": {"strike_offset": 0},
+    "indicator": {
+        "compute_interval_ms": 1000,  # spec: refresh every 1-5 s
+        "min_symbols": 10,
+        "nd_threshold": 1_000_000,  # rupees premium notional
+        "confidence_min": 0.85,
+        "rank_top_n": 5,
+        "nd_scale": 5_000_000,
+        "dv_scale": 50_000,
+    },
+    "exits": {
+        "exit_score_threshold": 0.5,
+        "sl_pct": 20.0,
+        "peak_trail_pct": 0.0,
+        "max_hold_sec": 0,
+    },
+    "execution": {"signal_max_age_sec": 10},
+}
+
 PCR_STRATEGY_CONFIGS: dict[str, dict[str, Any]] = {
     "oi_crossover_v1": _pcr_strategy_config(
         "OI Crossover",
@@ -399,6 +436,9 @@ UNIVERSE_INSTRUMENT_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
     },
     "leaderboard_overtake_v1": {
         "nifty50_stocks": _universe_instrument_config(max_positions=3, max_entries=10)
+    },
+    "rank_momentum_v2": {
+        "nifty50_stocks": _universe_instrument_config(max_positions=4, max_entries=10)
     },
 }
 
@@ -502,6 +542,11 @@ async def seed_strategy_registry(redis: _redis_async.Redis) -> None:
         nx=True,
     )
 
+    pipe.set(
+        K.strategy_config("rank_momentum_v2"),
+        orjson.dumps(DEFAULT_STRATEGY_CONFIG_RANK_MOMENTUM),
+        nx=True,
+    )
     for pcr_sid, pcr_cfg in PCR_STRATEGY_CONFIGS.items():
         pipe.set(K.strategy_config(pcr_sid), orjson.dumps(pcr_cfg), nx=True)
 

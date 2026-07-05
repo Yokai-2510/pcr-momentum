@@ -43,6 +43,7 @@ from engines.strategy.strategies.open_gainer_loser import (
 from engines.strategy.strategies.open_gainer_loser import (
     OpenGainerLoserStrategy,
 )
+from engines.strategy.strategies.rank_momentum import RankMomentumStrategy
 from engines.strategy.strategies.volume_diff import VolumeDiffStrategy
 from engines.strategy.strategies.vwap_band import VwapBandStrategy
 from state import keys as K
@@ -53,6 +54,7 @@ _STRATEGY_CLASSES: dict[str, type[Strategy]] = {
     "volume_diff_v1": VolumeDiffStrategy,
     "vwap_band_v1": VwapBandStrategy,
     "ltp_strength_v1": LtpStrengthStrategy,
+    "rank_momentum_v2": RankMomentumStrategy,
     BID_ASK_ID: BidAskImbalanceStrategy,
     OPEN_GL_ID: OpenGainerLoserStrategy,
     OVERTAKE_ID: LeaderboardOvertakeStrategy,

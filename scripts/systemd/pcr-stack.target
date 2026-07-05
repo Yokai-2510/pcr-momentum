@@ -6,7 +6,7 @@ After=pcr-init.service
 # Strategy units are template instances — one per registered strategy_id.
 # Adding a new strategy: append `pcr-strategy@<sid>.service` here, then
 # `systemctl daemon-reload` + enable + start the new instance.
-Wants=pcr-scheduler.service pcr-data-pipeline.service pcr-background.service pcr-order-exec.service pcr-health.service pcr-strategy@bid_ask_imbalance_v1.service pcr-strategy@open_gainer_loser_v1.service pcr-strategy@leaderboard_overtake_v1.service pcr-strategy@oi_crossover_v1.service pcr-strategy@volume_diff_v1.service pcr-strategy@vwap_band_v1.service pcr-strategy@ltp_strength_v1.service
+Wants=pcr-scheduler.service pcr-data-pipeline.service pcr-background.service pcr-order-exec.service pcr-health.service pcr-strategy@bid_ask_imbalance_v1.service pcr-strategy@open_gainer_loser_v1.service pcr-strategy@leaderboard_overtake_v1.service pcr-strategy@oi_crossover_v1.service pcr-strategy@volume_diff_v1.service pcr-strategy@vwap_band_v1.service pcr-strategy@ltp_strength_v1.service pcr-strategy@rank_momentum_v2.service
 
 [Install]
 WantedBy=multi-user.target
