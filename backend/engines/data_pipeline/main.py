@@ -114,6 +114,70 @@ async def _load_state(redis: Any) -> DataPipelineState | None:
                 if leaf and leaf.get("token"):
                     state.token_index[leaf["token"]] = (idx, strike, side)
 
+    # ── Stock universes (e.g. nifty50_stocks) ───────────────────────────
+    # Each universe contributes: 1 spot token per symbol + that symbol's
+    # option-chain tokens. Symbols ride the same machinery as indexes —
+    # their instrument_id (e.g. "stk_reliance") is just another chain owner.
+    universe_ids = [
+        u.decode() if isinstance(u, bytes) else str(u)
+        for u in (await redis.smembers(K.MARKET_DATA_UNIVERSES) or set())
+    ]
+    for uid in sorted(universe_ids):
+        raw_meta = await redis.get(K.market_data_index_meta(uid))
+        if not raw_meta:
+            logger.warning(f"data_pipeline: universe {uid} registered but meta missing")
+            continue
+        try:
+            umeta = orjson.loads(raw_meta if isinstance(raw_meta, bytes) else raw_meta.encode())
+        except Exception:
+            logger.warning(f"data_pipeline: universe {uid} meta unparseable")
+            continue
+        symbols: dict[str, Any] = umeta.get("symbols") or {}
+        chain_pipe = redis.pipeline(transaction=False)
+        sym_items = sorted(symbols.items())
+        for _sym, info in sym_items:
+            chain_pipe.get(K.market_data_index_option_chain(str(info.get("instrument_id"))))
+        chain_blobs = await chain_pipe.execute()
+        n_tokens = 0
+        for (sym, info), chain_blob in zip(sym_items, chain_blobs, strict=True):
+            sidx = str(info.get("instrument_id"))
+            spot_token = info.get("spot_token")
+            state.indexes.append(sidx)
+            state.index_meta[sidx] = {
+                "universe": uid,
+                "symbol": sym,
+                "prev_close": info.get("prev_close") or 0,
+            }
+            if spot_token:
+                state.token_index[str(spot_token)] = (sidx, 0, "spot")
+                n_tokens += 1
+            if not chain_blob:
+                continue
+            try:
+                chain = orjson.loads(
+                    chain_blob if isinstance(chain_blob, bytes) else chain_blob.encode()
+                )
+            except Exception:
+                continue
+            if not isinstance(chain, dict):
+                continue
+            state.chain[sidx] = chain
+            for strike_str, sides in chain.items():
+                try:
+                    strike = int(strike_str)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(sides, dict):
+                    continue
+                for side in ("ce", "pe"):
+                    leaf = sides.get(side)
+                    if isinstance(leaf, dict) and leaf.get("token"):
+                        state.token_index[str(leaf["token"])] = (sidx, strike, side)
+                        n_tokens += 1
+        logger.info(
+            f"data_pipeline: universe {uid} loaded — symbols={len(symbols)} tokens={n_tokens}"
+        )
+
     if not state.token_index:
         logger.error("data_pipeline: no tokens in option_chain templates; did Init step 11 run?")
         return None

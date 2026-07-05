@@ -87,10 +87,15 @@ class MarketView:
     """
 
     chain: dict[str, Any]  # option_chain: strike -> {ce: {...}, pe: {...}}
-    spot: dict[str, Any]  # spot hash (ltp, prev_close, ...)
-    meta: dict[str, Any]  # market_data:{idx}:meta
+    spot: dict[str, Any]  # spot hash (ltp, prev_close, ...); for stock
+    # universes: {SYMBOL: {ltp, prev_close, change_pct, volume, ts}}
+    meta: dict[str, Any]  # market_data:{idx}:meta (universe: symbols + token_map)
     now_ms: int
     token_lookup: Callable[[int, str], str | None]  # (strike, "CE"/"PE") -> token
+    # Universe vessels only: lazily read one SYMBOL's option chain. Runner-
+    # injected so strategies stay pure/testable while avoiding a 50-chain
+    # eager read per tick.
+    read_chain: Callable[[str], dict[str, Any]] | None = None
 
 
 @dataclass(slots=True, frozen=True)

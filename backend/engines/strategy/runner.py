@@ -124,8 +124,47 @@ def _build_token_lookup(
     return _lookup
 
 
-def _read_market_view(redis_sync: Any, index: str) -> MarketView:
-    """One consistent read of everything the strategy hooks may need."""
+def _read_universe_spot(redis_sync: Any, index: str) -> dict[str, Any]:
+    """Universe spot HASH: {SYMBOL: json{ltp, prev_close, change_pct, ...}}."""
+    raw = redis_sync.hgetall(K.market_data_index_spot(index))
+    out: dict[str, Any] = {}
+    for k, v in (raw or {}).items():
+        try:
+            out[_decode(k)] = orjson.loads(v if isinstance(v, bytes) else str(v).encode())
+        except Exception:
+            continue
+    return out
+
+
+def _read_market_view(
+    redis_sync: Any, index: str, *, universe_meta: dict[str, Any] | None = None
+) -> MarketView:
+    """One consistent read of everything the strategy hooks may need.
+
+    Universe vessels (instrument config `universe: true`) get: the aggregate
+    per-symbol spot map, the cached universe meta (symbols + token_map), and
+    a lazy per-symbol chain reader instead of a single chain.
+    """
+    if universe_meta is not None:
+        symbols: dict[str, Any] = universe_meta.get("symbols") or {}
+
+        def _read_symbol_chain(symbol: str) -> dict[str, Any]:
+            info = symbols.get(symbol) or {}
+            sidx = info.get("instrument_id")
+            if not sidx:
+                return {}
+            parsed = _read_json(redis_sync, K.market_data_index_option_chain(str(sidx)))
+            return parsed if isinstance(parsed, dict) else {}
+
+        return MarketView(
+            chain={},
+            spot=_read_universe_spot(redis_sync, index),
+            meta=universe_meta,
+            now_ms=int(time.time() * 1000),
+            token_lookup=lambda _strike, _side: None,
+            read_chain=_read_symbol_chain,
+        )
+
     chain = _read_json(redis_sync, K.market_data_index_option_chain(index)) or {}
     spot = _read_spot_hash(redis_sync, index)
     meta = _read_meta(redis_sync, index)
@@ -277,6 +316,16 @@ async def vessel_loop(
 
     spec.strategy.on_pre_open(spec.context)
 
+    # Universe vessels: cache the (static per-session) universe meta once;
+    # refreshed on the config-reload cadence below.
+    def _load_universe_meta() -> dict[str, Any] | None:
+        if not (spec.context.instrument_config or {}).get("universe"):
+            return None
+        parsed = _read_json(redis_sync, K.market_data_index_meta(idx))
+        return parsed if isinstance(parsed, dict) else {}
+
+    universe_meta = _load_universe_meta()
+
     # ── Universe maintenance (strategy-owned subscription policy) ────────
     async def ensure_universe(market: MarketView) -> None:
         update = spec.strategy.update_universe(spec.context, memory, market)
@@ -295,7 +344,7 @@ async def vessel_loop(
             f"unsubscribe={len(update.unsubscribe)}"
         )
 
-    await ensure_universe(_read_market_view(redis_sync, idx))
+    await ensure_universe(_read_market_view(redis_sync, idx, universe_meta=universe_meta))
 
     # ── LIVE loop ────────────────────────────────────────────────────────
     config_reload_at = time.time() + 60.0  # reload config every 60s
@@ -369,11 +418,12 @@ async def vessel_loop(
         if time.time() >= config_reload_at:
             reload_vessel_config(redis_sync, spec)
             spec.strategy.on_config_reload(spec.context, memory)
+            universe_meta = _load_universe_meta()
             config_reload_at = time.time() + 60.0
 
         # One consistent market read per evaluation; shared by the universe
         # check and the snapshot build (no double Redis round-trip).
-        market = _read_market_view(redis_sync, idx)
+        market = _read_market_view(redis_sync, idx, universe_meta=universe_meta)
 
         # Universe policy (e.g. ATM shift). Pure compute on the view; the
         # strategy's own hysteresis keeps this cheap on every tick.

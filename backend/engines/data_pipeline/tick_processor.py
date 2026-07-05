@@ -61,11 +61,25 @@ async def _process_one_tick(state: DataPipelineState, tick: ParsedTick) -> None:
     state.tokens_with_first_frame.add(tick.token)
 
     if side == "spot":
-        prev_close = float(state.index_meta.get(index, {}).get("prev_close") or 0) or None
+        meta_idx = state.index_meta.get(index, {})
+        # Stocks: prefer the live previous-close from the feed (ltpc.cp);
+        # fall back to the hint captured at universe build.
+        prev_close = tick.cp or float(meta_idx.get("prev_close") or 0) or None
         snap = update_spot_snapshot(state.spot.get(index), tick, prev_close)
         state.spot[index] = snap
         # Spot persisted right away (small payload).
         await flush_spot(state.redis, index, snap)
+        # Universe fan-out: stock ticks also land in the universe's
+        # aggregate spot HASH (symbol -> JSON) so ranking strategies read
+        # ONE key for all 50 symbols.
+        universe = meta_idx.get("universe")
+        symbol = meta_idx.get("symbol")
+        if universe and symbol:
+            await state.redis.hset(
+                K.market_data_index_spot(str(universe)),
+                str(symbol),
+                orjson.dumps(snap).decode(),
+            )
         await _emit_tick_stream(state.redis, index, tick.token, tick.ltp, tick.ts)
         # Notify any vessel subscribed to this spot token (used by ATM-shift logic).
         await state.redis.publish(K.market_data_pub_tick(tick.token), b"")

@@ -32,6 +32,15 @@ _DEFAULT_CACHE_DIR = os.environ.get(
 )
 
 
+# Rows parsed by the most recent load_master_instruments call (same process).
+_LAST_ROWS: list[dict[str, Any]] = []
+
+
+def last_master_rows() -> list[dict[str, Any]]:
+    """Raw master rows from the last load in this process (may be empty)."""
+    return _LAST_ROWS
+
+
 def _slimify(row: dict[str, Any]) -> dict[str, Any]:
     """Keep only the fields the runtime engines need for token → metadata lookup.
 
@@ -66,6 +75,11 @@ async def load_master_instruments(
     json_path = Path(res["data"]["json_path"])
     with open(json_path, encoding="utf-8") as f:
         rows = json.load(f)
+
+    # Retain for same-process consumers (universe builder in init step 11b)
+    # so the master JSON isn't re-downloaded / re-parsed within one boot.
+    global _LAST_ROWS
+    _LAST_ROWS = rows
 
     # Wipe-then-rewrite so stale instruments don't linger across days.
     pipe = redis.pipeline(transaction=False)

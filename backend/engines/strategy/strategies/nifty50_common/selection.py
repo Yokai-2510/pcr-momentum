@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from engines.strategy.strategies.bootstrap_momentum.direction import (
+from engines.strategy.strategies.nifty50_common.direction import (
     Chain,
     Leaf,
     find_atm_index,

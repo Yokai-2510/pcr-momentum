@@ -135,13 +135,15 @@ def test_check_and_reserve_blocks_already_open(fake_redis_sync: Any) -> None:
         fake_redis_sync,
         strategy_id="bid_ask_imbalance_v1",
         index="nifty50",
+        sig_id="pre-existing",
+        instrument_token="NSE_FO|other",
         premium_required_inr=5_000.0,
         trading_capital_inr=200_000.0,
         max_concurrent_positions=2,
     )
     ok, reason, _premium = pre_entry_gate.check_and_reserve(fake_redis_sync, _signal())
     assert ok is False
-    assert reason == "allocator_already_open_on_vessel"
+    assert reason == "allocator_already_open_on_vessel"  # vessel cap (1)
 
 
 def test_check_and_reserve_passes_through_readonly_failure(fake_redis_sync: Any) -> None:

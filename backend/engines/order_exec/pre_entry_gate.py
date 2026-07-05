@@ -28,7 +28,7 @@ from typing import Any
 import orjson
 import redis as _redis_sync
 
-from engines.order_exec import allocator, exec_policy
+from engines.order_exec import allocator, exec_policy, universe_lookup
 from state import keys as K
 from state.schemas.signal import Signal
 
@@ -64,11 +64,11 @@ def _read_leaf_for_token(
 ) -> dict[str, Any] | None:
     raw = redis_sync.get(K.market_data_index_option_chain(index))
     if not raw:
-        return None
+        return universe_lookup.read_leaf_via_universe(redis_sync, index, token)
     blob = raw if isinstance(raw, bytes) else raw.encode()
     chain = orjson.loads(blob)
     if not isinstance(chain, dict):
-        return None
+        return universe_lookup.read_leaf_via_universe(redis_sync, index, token)
     for _strike, sides in chain.items():
         if not isinstance(sides, dict):
             continue
@@ -76,7 +76,7 @@ def _read_leaf_for_token(
             leaf = sides.get(side)
             if isinstance(leaf, dict) and leaf.get("token") == token:
                 return leaf
-    return None
+    return universe_lookup.read_leaf_via_universe(redis_sync, index, token)
 
 
 def _read_execution_config(
@@ -196,7 +196,10 @@ def check_and_reserve(
         return False, "leaf_missing", 0.0
 
     idx_cfg = _read_instrument_config(redis_sync, signal.strategy_id, signal.index)
-    lot_size = int(idx_cfg.get("lot_size") or 1)
+    lot_size = universe_lookup.resolve_lot_size(
+        redis_sync, signal.index, signal.instrument_token, int(idx_cfg.get("lot_size") or 1)
+    )
+    max_positions_per_vessel = int(idx_cfg.get("max_positions_per_vessel") or 1)
 
     risk_cfg = _read_risk_config(redis_sync)
     trading_capital = float(risk_cfg.get("trading_capital_inr") or 0)
@@ -220,11 +223,14 @@ def check_and_reserve(
         redis_sync,
         strategy_id=signal.strategy_id,
         index=signal.index,
+        sig_id=signal.sig_id,
+        instrument_token=signal.instrument_token,
         premium_required_inr=premium_required,
         trading_capital_inr=trading_capital,
         max_concurrent_positions=max_concurrent,
         strategy_capital_inr=strategy_capital,
         strategy_max_parallel=strategy_max_parallel,
+        max_positions_per_vessel=max_positions_per_vessel,
     )
     if not ok2:
         return False, f"allocator_{alloc_reason.lower()}", 0.0

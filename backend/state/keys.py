@@ -48,11 +48,6 @@ VesselPhase = Literal["BOOT", "PRE_OPEN", "SETTLE", "LIVE", "DRAIN"]
 AuthHealth = Literal["valid", "invalid", "missing", "unknown"]
 
 
-def _validate_index(index: str) -> None:
-    if index not in INDEXES:
-        raise ValueError(f"unknown index {index!r}; expected one of {INDEXES}")
-
-
 def _validate_instrument(instrument: str) -> None:
     """Vessel-scoped keys accept any lowercase instrument id (index or stock
     symbol) — strategies are not limited to the market-data index set."""
@@ -147,6 +142,12 @@ MARKET_DATA_INSTRUMENTS_LAST_REFRESH_TS: Final[str] = "market_data:instruments:l
 
 # Subscriptions
 MARKET_DATA_SUBSCRIPTIONS_SET: Final[str] = "market_data:subscriptions:set"
+# SET of active stock-universe instrument ids (e.g. "nifty50_stocks").
+# Each universe has market_data:{uid}:meta (symbols + token_map) and
+# market_data:{uid}:spot (HASH symbol -> JSON snapshot); per-symbol option
+# chains live at market_data:{symbol_instrument_id}:option_chain.
+MARKET_DATA_UNIVERSES: Final[str] = "market_data:universes"
+
 MARKET_DATA_SUBSCRIPTIONS_DESIRED: Final[str] = "market_data:subscriptions:desired"
 
 # WS status
@@ -155,12 +156,12 @@ MARKET_DATA_WS_STATUS_PORTFOLIO: Final[str] = "market_data:ws_status:portfolio_w
 
 
 def market_data_index_meta(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"market_data:indexes:{index}:meta"
 
 
 def market_data_index_spot(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"market_data:indexes:{index}:spot"
 
 
@@ -174,13 +175,13 @@ def market_data_index_option_chain(index: str) -> str:
                       vol, oi, ts},
               "pe": {...same shape...}}}
     """
-    _validate_index(index)
+    _validate_instrument(index)
     return f"market_data:indexes:{index}:option_chain"
 
 
 def market_data_stream_tick(index: str) -> str:
     """Per-index tick stream (XADD MAXLEN ~50000)."""
-    _validate_index(index)
+    _validate_instrument(index)
     return f"market_data:stream:tick:{index}"
 
 
@@ -223,7 +224,7 @@ def strategy_config(sid: str) -> str:
 def strategy_config_instrument(sid: str, index: str) -> str:
     """Instrument-level overrides for a strategy (JSON). See Strategy.md §10.2."""
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:configs:strategies:{sid}:instruments:{index}"
 
 
@@ -363,7 +364,7 @@ def orders_position(pos_id: str) -> str:
 def orders_positions_open_by_vessel(sid: str, index: str) -> str:
     """STRING — position_id of the currently-open position for this vessel, if any."""
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"orders:positions:open_by_vessel:{sid}:{index}"
 
 
@@ -407,7 +408,7 @@ def orders_pnl_per_strategy(sid: str) -> str:
 
 def orders_pnl_per_vessel(sid: str, index: str) -> str:
     _validate_strategy_id(sid)
-    _validate_index(index)
+    _validate_instrument(index)
     return f"orders:pnl:per_vessel:{sid}:{index}"
 
 
@@ -446,7 +447,7 @@ def ui_view_vessel(sid: str, index: str) -> str:
 
 
 def ui_view_position(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"ui:views:position:{index}"
 
 
@@ -479,37 +480,37 @@ def heartbeat_field_vessel(sid: str, index: str) -> str:
 # ΔPCR keys — DEPRECATED (no longer written, no longer consumed by strategy).
 # Returning a stable legacy namespace so any leftover read returns empty.
 def delta_pcr_baseline(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:baseline"
 
 
 def delta_pcr_last_oi(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:last_oi"
 
 
 def delta_pcr_interval(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:interval"
 
 
 def delta_pcr_cumulative(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:cumulative"
 
 
 def delta_pcr_history(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:history"
 
 
 def delta_pcr_last_compute_ts(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:last_compute_ts"
 
 
 def delta_pcr_mode(index: str) -> str:
-    _validate_index(index)
+    _validate_instrument(index)
     return f"strategy:legacy:{index}:delta_pcr:mode"
 
 
@@ -517,7 +518,7 @@ def delta_pcr_mode(index: str) -> str:
 def orders_positions_open_by_index(index: str) -> str:
     """DEPRECATED — superseded by orders_positions_open_by_vessel. Kept as
     a legacy SET key for migrations that still write to it."""
-    _validate_index(index)
+    _validate_instrument(index)
     return f"orders:positions:open_by_index:{index}"
 
 
@@ -527,7 +528,7 @@ def orders_positions_open_by_index(index: str) -> str:
 def ui_view_delta_pcr(index: str) -> str:
     """DEPRECATED — ΔPCR view; left in place to avoid breaking the frontend
     contract until that view is removed in Phase F.5."""
-    _validate_index(index)
+    _validate_instrument(index)
     return f"ui:views:legacy:delta_pcr:{index}"
 
 

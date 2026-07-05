@@ -15,20 +15,28 @@ three granularities of fields:
     "strategy:{sid}"   per-strategy subtotal
     "total"            global
 
-Five caps enforced on `check_and_reserve` (any strategy-level cap set to 0
-means "no per-strategy limit; only the global envelope applies"):
+Each reservation is identified by its `sig_id` + `instrument_token`
+(set entries `r:{sid}:{idx}:{sig_id}` / `t:{sid}:{idx}:{token}`), so a vessel
+can hold MULTIPLE concurrent positions (stock-universe strategies) while
+duplicate signals and duplicate option legs stay blocked.
 
-  1. per-vessel        : this (strategy, instrument) must not already hold
-                         an open position
-  2. strategy parallel : open positions for this strategy must stay under
+Caps enforced on `check_and_reserve` (strategy-level caps of 0 mean "no
+per-strategy limit; only the global envelope applies"):
+
+  0. duplicate signal  : same sig_id already reserved -> DUPLICATE_SIGNAL
+  1. per-token         : this option token already held by this vessel ->
+                         ALREADY_OPEN_ON_TOKEN (no doubled legs)
+  2. per-vessel        : open positions for this (strategy, instrument) must
+                         stay under `max_positions_per_vessel` (default 1)
+  3. strategy parallel : open positions for this strategy must stay under
                          `strategy_max_parallel`
-  3. strategy capital  : strategy's deployed + premium <= `strategy_capital_inr`
-  4. global concurrency: total open across everything must not exceed
+  4. strategy capital  : strategy's deployed + premium <= `strategy_capital_inr`
+  5. global concurrency: total open across everything must not exceed
                          `max_concurrent_positions`
-  5. global capital    : `deployed[total] + premium <= trading_capital_inr`
+  6. global capital    : `deployed[total] + premium <= trading_capital_inr`
 
-`release` is idempotent — gated on the vessel's membership in the
-open-symbols set, so double release never drives counters negative.
+`release` is idempotent — gated on the reservation entry's membership, so
+double release never drives counters negative.
 """
 
 from __future__ import annotations
@@ -53,16 +61,27 @@ def strategy_field(strategy_id: str) -> str:
     return f"strategy:{strategy_id}"
 
 
+def reservation_entry(strategy_id: str, index: str, sig_id: str) -> str:
+    return f"r:{strategy_id}:{index}:{sig_id}"
+
+
+def token_entry(strategy_id: str, index: str, instrument_token: str) -> str:
+    return f"t:{strategy_id}:{index}:{instrument_token}"
+
+
 def check_and_reserve(
     redis_sync: _redis_sync.Redis,
     *,
     strategy_id: str,
     index: str,
+    sig_id: str,
+    instrument_token: str,
     premium_required_inr: float,
     trading_capital_inr: float,
     max_concurrent_positions: int,
     strategy_capital_inr: float = 0.0,
     strategy_max_parallel: int = 0,
+    max_positions_per_vessel: int = 1,
 ) -> tuple[bool, str, float, int]:
     """Atomically check the five caps and, if they pass, reserve the slot.
 
@@ -70,8 +89,9 @@ def check_and_reserve(
 
     On ``ok=True`` the reservation is held until ``release(...)`` is called.
     On ``ok=False`` no state has been mutated and `reason` identifies the
-    cap that failed: ``ALREADY_OPEN_ON_VESSEL`` / ``MAX_PARALLEL_FOR_STRATEGY``
-    / ``INSUFFICIENT_STRATEGY_CAPITAL`` / ``MAX_CONCURRENT_REACHED`` /
+    cap that failed: ``DUPLICATE_SIGNAL`` / ``ALREADY_OPEN_ON_TOKEN`` /
+    ``ALREADY_OPEN_ON_VESSEL`` / ``MAX_PARALLEL_FOR_STRATEGY`` /
+    ``INSUFFICIENT_STRATEGY_CAPITAL`` / ``MAX_CONCURRENT_REACHED`` /
     ``INSUFFICIENT_CAPITAL``.
 
     `strategy_capital_inr` / `strategy_max_parallel` of 0 disable the
@@ -84,6 +104,8 @@ def check_and_reserve(
 
     vfield = vessel_field(strategy_id, index)
     sfield = strategy_field(strategy_id)
+    r_entry = reservation_entry(strategy_id, index, sig_id)
+    t_entry = token_entry(strategy_id, index, instrument_token)
 
     result: dict[str, float | int | str | bool] = {"ok": False, "reason": "unknown"}
 
@@ -95,31 +117,42 @@ def check_and_reserve(
         cur_total = int(pipe.hget(open_key, "total") or 0)
         deployed_total = float(pipe.hget(deployed_key, "total") or 0)
 
-        # Cap 1: per-vessel — one open position per (strategy, instrument)
-        if pipe.sismember(symbols_key, vfield):
+        # Cap 0: exact duplicate signal (replay / double-dispatch)
+        if pipe.sismember(symbols_key, r_entry):
+            _fail("DUPLICATE_SIGNAL", deployed_total, cur_total)
+            return
+
+        # Cap 1: per-token — this vessel already holds this option leg
+        if pipe.sismember(symbols_key, t_entry):
+            _fail("ALREADY_OPEN_ON_TOKEN", deployed_total, cur_total)
+            return
+
+        # Cap 2: per-vessel concurrent positions
+        vessel_open = int(pipe.hget(open_key, vfield) or 0)
+        if vessel_open + 1 > max(1, max_positions_per_vessel):
             _fail("ALREADY_OPEN_ON_VESSEL", deployed_total, cur_total)
             return
 
-        # Cap 2: per-strategy parallel positions
+        # Cap 3: per-strategy parallel positions
         if strategy_max_parallel > 0:
             strat_open = int(pipe.hget(open_key, sfield) or 0)
             if strat_open + 1 > strategy_max_parallel:
                 _fail("MAX_PARALLEL_FOR_STRATEGY", deployed_total, cur_total)
                 return
 
-        # Cap 3: per-strategy capital
+        # Cap 4: per-strategy capital
         if strategy_capital_inr > 0:
             strat_deployed = float(pipe.hget(deployed_key, sfield) or 0)
             if strat_deployed + premium_required_inr > strategy_capital_inr:
                 _fail("INSUFFICIENT_STRATEGY_CAPITAL", deployed_total, cur_total)
                 return
 
-        # Cap 4: global concurrency
+        # Cap 5: global concurrency
         if cur_total + 1 > max_concurrent_positions:
             _fail("MAX_CONCURRENT_REACHED", deployed_total, cur_total)
             return
 
-        # Cap 5: global capital
+        # Cap 6: global capital
         if deployed_total + premium_required_inr > trading_capital_inr:
             _fail("INSUFFICIENT_CAPITAL", deployed_total, cur_total)
             return
@@ -132,7 +165,8 @@ def check_and_reserve(
         pipe.hincrby(open_key, vfield, 1)
         pipe.hincrby(open_key, sfield, 1)
         pipe.hincrby(open_key, "total", 1)
-        pipe.sadd(symbols_key, vfield)
+        pipe.sadd(symbols_key, r_entry)
+        pipe.sadd(symbols_key, t_entry)
 
         result.update(
             ok=True,
@@ -172,14 +206,16 @@ def release(
     *,
     strategy_id: str,
     index: str,
+    sig_id: str,
+    instrument_token: str,
     premium_to_release_inr: float,
 ) -> tuple[bool, str]:
     """Release a previously-held reservation. Idempotent.
 
-    Guards on the vessel's membership in the open-symbols set, so a double
-    release (or a release when nothing is reserved) is a no-op returning
-    ``(False, "NOT_RESERVED")`` instead of driving the counters negative.
-    The cleanup path can therefore retry safely.
+    Guards on the reservation entry's membership in the open-symbols set, so
+    a double release (or a release when nothing is reserved) is a no-op
+    returning ``(False, "NOT_RESERVED")`` instead of driving the counters
+    negative. The cleanup path can therefore retry safely.
     """
     log = logger.bind(engine="order_exec", sid=strategy_id, index=index)
     deployed_key = K.ORDERS_ALLOCATOR_DEPLOYED
@@ -192,10 +228,11 @@ def release(
     try:
         # SREM returns the count actually removed (0 or 1); doing it first
         # both gates idempotency and tells us whether a reservation existed.
-        removed = redis_sync.srem(symbols_key, vfield)
+        removed = redis_sync.srem(symbols_key, reservation_entry(strategy_id, index, sig_id))
         if not removed:
             return False, "NOT_RESERVED"
         pipe = redis_sync.pipeline(transaction=True)
+        pipe.srem(symbols_key, token_entry(strategy_id, index, instrument_token))
         pipe.hincrbyfloat(deployed_key, vfield, -float(premium_to_release_inr))
         pipe.hincrbyfloat(deployed_key, sfield, -float(premium_to_release_inr))
         pipe.hincrbyfloat(deployed_key, "total", -float(premium_to_release_inr))

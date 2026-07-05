@@ -63,8 +63,11 @@ class TestPerVesselHelpers:
     def test_invalid_instrument_rejected(self) -> None:
         with pytest.raises(ValueError, match="invalid instrument"):
             keys.vessel_state(self.SID, "NIFTY50")  # uppercase rejected
-        with pytest.raises(ValueError, match="unknown index"):
-            keys.market_data_index_meta("sensex")
+        with pytest.raises(ValueError, match="invalid instrument"):
+            keys.market_data_index_meta("SENSEX-X")  # format-invalid rejected
+        # Universe / stock instrument ids are valid market-data owners now.
+        assert keys.market_data_index_meta("nifty50_stocks").endswith(":meta")
+        assert keys.market_data_index_spot("stk_reliance").endswith(":spot")
 
 
 class TestPosOrderHelpers:

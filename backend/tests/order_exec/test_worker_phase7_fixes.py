@@ -216,6 +216,8 @@ def test_bug3_allocator_blocks_when_index_already_open(
         fake_redis_sync,
         strategy_id="bid_ask_imbalance_v1",
         index="nifty50",
+        sig_id="pre-existing",
+        instrument_token="NSE_FO|other",
         premium_required_inr=5_000.0,
         trading_capital_inr=200_000.0,
         max_concurrent_positions=2,

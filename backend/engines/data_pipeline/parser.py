@@ -49,6 +49,7 @@ class ParsedTick:
     # Other.
     vol: int | None = None
     oi: int | None = None
+    cp: float | None = None  # previous-day close (ltpc.cp) — stocks need it
     ts: int = 0  # epoch ms
 
 
@@ -182,6 +183,7 @@ def _extract_one(token: str, payload: dict[str, Any], default_ts: int) -> Parsed
         total_ask_qty=total_ask,
         vol=_i(vol),
         oi=_i(oi),
+        cp=_f(ltpc.get("cp") or ltpc.get("CP")),
         ts=ts,
     )
 

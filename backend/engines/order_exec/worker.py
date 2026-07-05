@@ -49,6 +49,7 @@ from engines.order_exec import (
     exit_submit,
     pre_entry_gate,
     reporting,
+    universe_lookup,
 )
 from engines.order_exec import (
     entry as entry_mod,
@@ -110,16 +111,17 @@ def _read_instrument_config(
 
 def _read_leaf(redis_sync: _redis_sync.Redis, index: str, token: str) -> dict[str, Any] | None:
     chain = _read_json(redis_sync, K.market_data_index_option_chain(index))
-    if not isinstance(chain, dict):
-        return None
-    for _strike, sides in chain.items():
-        if not isinstance(sides, dict):
-            continue
-        for side in ("ce", "pe"):
-            leaf = sides.get(side)
-            if isinstance(leaf, dict) and leaf.get("token") == token:
-                return leaf
-    return None
+    if isinstance(chain, dict):
+        for _strike, sides in chain.items():
+            if not isinstance(sides, dict):
+                continue
+            for side in ("ce", "pe"):
+                leaf = sides.get(side)
+                if isinstance(leaf, dict) and leaf.get("token") == token:
+                    return leaf
+    # Stock-universe signals: the leaf lives in the SYMBOL's chain,
+    # resolved through the universe token_map.
+    return universe_lookup.read_leaf_via_universe(redis_sync, index, token)
 
 
 def _read_mode(redis_sync: _redis_sync.Redis) -> str:
@@ -401,7 +403,12 @@ def _close_existing_position_for_flip(
     # observable here).
     released_premium = float(prior.entry_price) * float(prior.qty)
     allocator.release(
-        redis_sync, strategy_id=strategy_id, index=index, premium_to_release_inr=released_premium
+        redis_sync,
+        strategy_id=strategy_id,
+        index=index,
+        sig_id=prior.sig_id,
+        instrument_token=prior.instrument_token,
+        premium_to_release_inr=released_premium,
     )
 
     _persist_status(redis_sync, cur_pos_id, PositionStage.DONE)
@@ -456,7 +463,10 @@ def process_signal(
     # From here on, any abort path MUST release the allocator reservation.
 
     cfg_idx = _read_instrument_config(redis_sync, signal.strategy_id, signal.index)
-    lot_size = int(cfg_idx.get("lot_size") or 1)
+    # Stock options have per-symbol lot sizes (universe token_map wins).
+    lot_size = universe_lookup.resolve_lot_size(
+        redis_sync, signal.index, signal.instrument_token, int(cfg_idx.get("lot_size") or 1)
+    )
     sl_pct = float(cfg_idx.get("sl_pct") or 0.20)
     target_pct = float(cfg_idx.get("target_pct") or 0.50)
     tsl_arm_pct = float(cfg_idx.get("tsl_arm_pct") or 0.15)
@@ -490,6 +500,8 @@ def process_signal(
             redis_sync,
             strategy_id=signal.strategy_id,
             index=signal.index,
+            sig_id=signal.sig_id,
+            instrument_token=signal.instrument_token,
             premium_to_release_inr=premium_reserved,
         )
         return
@@ -740,13 +752,15 @@ def _monitor_and_close(
     except Exception as e:
         log.exception(f"cleanup raised (non-fatal): {e!r}")
 
-    # Release the allocator slot now that the position is closed.
-    allocator.release(
-        redis_sync,
-        strategy_id=signal.strategy_id,
-        index=signal.index,
-        premium_to_release_inr=premium_reserved,
-    )
+        # Release the allocator slot now that the position is closed.
+        allocator.release(
+            redis_sync,
+            strategy_id=signal.strategy_id,
+            index=signal.index,
+            sig_id=signal.sig_id,
+            instrument_token=signal.instrument_token,
+            premium_to_release_inr=premium_reserved,
+        )
     # Clear any strategy exit-pull flag now that we've acted on it.
     redis_sync.delete(K.orders_exit_pull(pos_id))
 

@@ -105,6 +105,7 @@ def update_spot_snapshot(
         "prev_close": pc,
         "change_inr": round(change_inr, 4),
         "change_pct": round(change_pct, 4),
+        "volume": tick.vol if tick.vol is not None else (spot or {}).get("volume", 0),
         "ts": tick.ts,
     }
 

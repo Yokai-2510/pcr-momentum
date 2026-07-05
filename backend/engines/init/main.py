@@ -33,6 +33,7 @@ from engines.init import (
     auth_bootstrap,
     holiday_check,
     instruments_loader,
+    nifty50_universe,
     postgres_hydrator,
     redis_template,
     strike_basket_builder,
@@ -198,6 +199,11 @@ async def main() -> int:
 
     # ── STEP 11: Per-index basket build ─────────────────────────────────
     vessels = await registry.list_vessels(redis)
+    # Universe instruments (stock universes) are built in step 11b — they
+    # don't need an index basket and must not fail the day here.
+    universe_instruments = sorted(
+        {i for _s, i in vessels if i in nifty50_universe.UNIVERSE_BUILDERS}
+    )
     enabled_indexes: list[K.IndexName] = []
     for idx in K.INDEXES:
         idx_vessels = [(s, i) for s, i in vessels if i == idx]
@@ -206,8 +212,8 @@ async def main() -> int:
         flags = [await _read_str(redis, K.vessel_enabled(s, i), "true") for s, i in idx_vessels]
         if any(f.lower() == "true" for f in flags):
             enabled_indexes.append(idx)
-    if not enabled_indexes:
-        log.error("step11: no indexes enabled; skipping the day")
+    if not enabled_indexes and not universe_instruments:
+        log.error("step11: no indexes or universes enabled; skipping the day")
         await _set_disabled(redis, "no_indexes_enabled")
         await redis.set(K.SYSTEM_FLAGS_READY, "true")
         return 0
@@ -231,11 +237,33 @@ async def main() -> int:
             f"step11[{active_idx}]: atm={res['atm']} expiry={res['expiry']} tokens={res['tokens']}"
         )
         succeeded += 1
-    if succeeded == 0:
+    if succeeded == 0 and enabled_indexes and not universe_instruments:
         log.error("step11: all indexes failed; skipping the day")
         await _set_disabled(redis, "basket_build_failed")
         await redis.set(K.SYSTEM_FLAGS_READY, "true")
         return 0
+
+    # ── STEP 11b: Stock-universe build (strategy external-data demands) ─
+    # Strategies may demand data that never arrives on the websocket
+    # (index constituents, instrument maps). Each registered universe
+    # instrument is built by its UNIVERSE_BUILDERS entry.
+    for uid in universe_instruments:
+        builder = nifty50_universe.UNIVERSE_BUILDERS[uid]
+        try:
+            ures = await builder(redis, instruments_loader.last_master_rows())
+        except Exception as e:
+            log.error(f"step11b[{uid}]: universe build raised: {e}")
+            ures = {"error": 1}
+        if ures.get("error") or not ures.get("symbols"):
+            log.error(f"step11b[{uid}]: build failed — disabling its vessels")
+            for _vs, _vi in vessels:
+                if _vi == uid:
+                    await redis.set(K.vessel_enabled(_vs, _vi), "false")
+        else:
+            log.info(
+                f"step11b[{uid}]: symbols={ures['symbols']} tokens={ures['tokens']} "
+                f"options={ures.get('options', 0)}"
+            )
 
     # ── STEP 12: Final readiness ────────────────────────────────────────
     pipe = redis.pipeline(transaction=False)
